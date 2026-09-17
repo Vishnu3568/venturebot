@@ -40,14 +40,14 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 ---
 
 ## Current Version
-**V0.1 — Data Contracts**
+**V0.2 — Financial Ledger**
 
 ---
 
 ## Current Status
-**Step 2 — Canonical Data Contracts Defined**
+**Step 3 — Persistent Database & Financial Ledger Implemented**
 
-Five Pydantic v2 data models have been defined and tested. No database, no agents, no APIs, no dashboard.
+SQLite selected for V0 and SQLAlchemy database layer created. Persistent, append-oriented CapitalTransaction ledger implemented with ₹1,000 starting capital initialized through the ledger and complete financial summary calculations. 57 unit/integration tests passing.
 
 ---
 
@@ -57,11 +57,12 @@ Five Pydantic v2 data models have been defined and tested. No database, no agent
 - Advertising APIs (Meta Ads, Google Ads, TikTok Ads)
 - Payment / financial systems (Razorpay, Stripe, UPI integrations)
 - Autonomous spending (any code that moves real money)
+- Bank integrations / real money transfers
+- External revenue APIs
+- Automatic capital allocation
 - Content publishing (social media posting, blog automation)
 - Web scraping (any data harvesting pipelines)
 - Dashboard / UI (React frontend, charts, analytics views)
-- **Persistent database** (ORM, migrations, SQLite/Postgres — Step 3)
-- Revenue tracking / ledger logic (Step 3+)
 - Automated decision making (any non-human-triggered action)
 
 ---
@@ -70,7 +71,8 @@ Five Pydantic v2 data models have been defined and tested. No database, no agent
 
 - **V0**   Foundation — Clean project structure, documentation, configuration ✅
 - **V0.1** Data Contracts — Pydantic models for all canonical entities ✅
-- **V0.2** Research/Decision Foundation — Tools for structured opportunity research and human-led decision logging
+- **V0.2** Financial Ledger — Persistent SQLite database, append-only ledger, ₹1,000 capital tracking ✅
+- **V0.3** Research/Decision Foundation — Tools for structured opportunity research and human-led decision logging
 - **V1**   Experiment Generation — Framework to define, scope, and document experiments before running them
 - **V2**   Controlled Execution — Supervised execution of approved experiments with hard capital limits
 - **V3**   Feedback & Optimization — Measurement, analysis, and iteration loops on completed experiments
@@ -131,4 +133,52 @@ Five Pydantic v2 data models have been defined and tested. No database, no agent
 - [x] No APIs implemented
 - [x] No dashboard implemented
 
-Project is ready for Step 3 (persistent database and financial ledger).
+---
+
+## Step 3 — Financial Ledger
+
+### Database Layer
+
+- **Database**: SQLite (zero infrastructure, file-based/in-memory, migratable to PostgreSQL later)
+- **ORM**: SQLAlchemy 2.x (`DeclarativeBase`, `Mapped`, `mapped_column`, `select`)
+- **Isolation**: In-memory SQLite (`sqlite:///:memory:`) with `StaticPool` for test isolation
+
+### Components Created
+
+| Component | File | Description |
+|---|---|---|
+| ORM Models | `venturebot/database/models.py` | `CapitalTransactionORM` mapping to `capital_transactions` table |
+| Connection | `venturebot/database/connection.py` | Engine creation, sessionmaker, and `init_db` |
+| Capital Repository | `venturebot/database/repositories/capital.py` | `CapitalRepository` and `FinancialSummary` model |
+| Package Exports | `venturebot/database/__init__.py` | Clean imports for database layer |
+| Tests | `tests/test_ledger.py` | 18 unit/integration tests for ledger operations |
+
+### Financial Accounting Invariants Enforced
+
+- Starting capital initialized at ₹1,000.00 via an explicit `INITIAL_DEPOSIT` transaction.
+- Duplicate initialization prevented (idempotent, returns existing record; direct duplicate attempt raises `ValueError`).
+- Amounts strictly positive (`Decimal >= 0.01`).
+- Append-only design: transactions are never updated or deleted.
+- Revenue vs Profit distinction strictly maintained:
+  - `net_profit = total_revenue - total_cost`
+  - `current_balance = total_inflow - total_outflow`
+  - `roi = (net_profit / total_cost)` (or `None` when zero costs)
+
+### Dependencies Added
+
+- `sqlalchemy>=2.0` (runtime)
+
+### Step 3 Checklist
+
+- [x] SQLite selected for V0
+- [x] SQLAlchemy database layer created
+- [x] Financial ledger implemented
+- [x] ₹1,000 starting capital represented through the ledger
+- [x] Financial summary calculations implemented (balance, profit, revenue, cost, ROI)
+- [x] 18 new ledger tests added (57 total tests passing)
+- [x] Dashboard NOT implemented
+- [x] Agents NOT implemented
+- [x] External money integrations NOT implemented
+- [x] Autonomous spending NOT implemented
+
+Project is ready for Step 4.
