@@ -40,20 +40,18 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 ---
 
 ## Current Version
-**V0 — Foundation**
+**V0.1 — Data Contracts**
 
 ---
 
 ## Current Status
-**Step 1 — Project Foundation**
+**Step 2 — Canonical Data Contracts Defined**
 
-The repository has been initialized with a clean directory structure, project documentation, and configuration files only. No functional code has been written.
+Five Pydantic v2 data models have been defined and tested. No database, no agents, no APIs, no dashboard.
 
 ---
 
 ## What Is Intentionally NOT Implemented Yet
-
-The following are explicitly out of scope for V0 Foundation:
 
 - AI / Agent logic (LLM agents, sub-agents, orchestration)
 - Advertising APIs (Meta Ads, Google Ads, TikTok Ads)
@@ -62,16 +60,17 @@ The following are explicitly out of scope for V0 Foundation:
 - Content publishing (social media posting, blog automation)
 - Web scraping (any data harvesting pipelines)
 - Dashboard / UI (React frontend, charts, analytics views)
-- Database models (ORM schemas, migrations, seed data)
-- Revenue tracking logic (profit/loss calculations, ledgers)
+- **Persistent database** (ORM, migrations, SQLite/Postgres — Step 3)
+- Revenue tracking / ledger logic (Step 3+)
 - Automated decision making (any non-human-triggered action)
 
 ---
 
 ## Future High-Level Phases
 
-- **V0**   Foundation — Clean project structure, documentation, configuration
-- **V0.1** Research/Decision Foundation — Tools for structured opportunity research and human-led decision logging
+- **V0**   Foundation — Clean project structure, documentation, configuration ✅
+- **V0.1** Data Contracts — Pydantic models for all canonical entities ✅
+- **V0.2** Research/Decision Foundation — Tools for structured opportunity research and human-led decision logging
 - **V1**   Experiment Generation — Framework to define, scope, and document experiments before running them
 - **V2**   Controlled Execution — Supervised execution of approved experiments with hard capital limits
 - **V3**   Feedback & Optimization — Measurement, analysis, and iteration loops on completed experiments
@@ -100,4 +99,36 @@ The following are explicitly out of scope for V0 Foundation:
 - [x] No dependencies installed
 - [x] No placeholder logic invented
 
-Project is ready for Step 2.
+---
+
+## Step 2 — Data Contracts
+
+### Canonical Entities Defined
+
+| Model | File | Key design decisions |
+|---|---|---|
+| Opportunity | venturebot/models/opportunity.py | OpportunityCategory + OpportunityStatus enums; Decimal money estimates; confidence 0–1 |
+| Experiment | venturebot/models/experiment.py | allocated_budget and actual_spend kept explicitly separate; max_allowed_spend enforced by model_validator |
+| ExperimentMetrics | venturebot/models/metrics.py | All money in Decimal; rates/ROI optional and caller-set (no universal formula imposed) |
+| CapitalTransaction | venturebot/models/capital.py | TransactionType enum; amounts always positive (direction implied by type) for clean audit trail |
+| Decision | venturebot/models/decision.py | DecisionOutcome enum: KILL / ITERATE / SCALE / HOLD; reason field required on every decision |
+
+### Dependencies Added
+
+- pydantic>=2.7 (runtime)
+- pytest>=8 (dev)
+
+### Step 2 Checklist
+
+- [x] Opportunity model — typed, tested
+- [x] Experiment model — budget/spend distinction enforced
+- [x] ExperimentMetrics model — no universal formulas imposed
+- [x] CapitalTransaction model — auditable, enum-constrained types
+- [x] Decision model — KILL/ITERATE/SCALE/HOLD outcomes
+- [x] 39 unit tests — all passing
+- [x] No database implemented
+- [x] No agents implemented
+- [x] No APIs implemented
+- [x] No dashboard implemented
+
+Project is ready for Step 3 (persistent database and financial ledger).
