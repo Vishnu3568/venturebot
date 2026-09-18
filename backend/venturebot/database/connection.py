@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Generator
-
-from sqlalchemy import Engine, create_engine
+from typing import Any
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -18,9 +17,10 @@ def get_engine(db_url: str = DEFAULT_DB_URL, echo: bool = False) -> Engine:
     
     If SQLite in-memory database is specified, uses StaticPool so that
     multiple connections/sessions share the same in-memory database.
+    Enforces SQLite foreign key constraints.
     """
-    connect_args = {}
-    engine_kwargs = {"echo": echo}
+    connect_args: dict[str, Any] = {}
+    engine_kwargs: dict[str, Any] = {"echo": echo}
 
     if db_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
@@ -28,7 +28,16 @@ def get_engine(db_url: str = DEFAULT_DB_URL, echo: bool = False) -> Engine:
             engine_kwargs["poolclass"] = StaticPool
 
     engine_kwargs["connect_args"] = connect_args
-    return create_engine(db_url, **engine_kwargs)
+    engine = create_engine(db_url, **engine_kwargs)
+
+    if db_url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return engine
 
 
 def get_session_factory(engine: Engine) -> sessionmaker[Session]:
