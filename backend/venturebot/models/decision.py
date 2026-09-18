@@ -14,6 +14,7 @@ class DecisionOutcome(str, Enum):
     ITERATE = "iterate" # change something and try again
     SCALE = "scale"     # increase budget / reach
     HOLD = "hold"       # pause, gather more data before acting
+    APPROVE = "approve" # approved for execution / allocation
 
 
 class Decision(BaseModel):
