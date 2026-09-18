@@ -9,6 +9,7 @@ Verifies:
 - Test isolation using SQLite in-memory databases
 """
 
+from collections.abc import Generator
 from decimal import Decimal
 from uuid import uuid4
 
@@ -22,7 +23,7 @@ from venturebot.models.capital import CapitalTransaction, TransactionType
 
 
 @pytest.fixture
-def session() -> Session:
+def session() -> Generator[Session, None, None]:
     """Provide an isolated, clean in-memory SQLite database session for each test."""
     # Using a unique in-memory database per test ensures total test isolation
     db_url = f"sqlite:///:memory:"
