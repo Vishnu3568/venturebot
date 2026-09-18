@@ -9,9 +9,16 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
 
 
+from venturebot.models.evidence import EvidenceCategory
+
+
 class ExperimentMetrics(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     experiment_id: UUID
+
+    # Evidence Classification (Section 17 of Architecture)
+    evidence_type: EvidenceCategory = EvidenceCategory.FACT
+    source_reference: str = ""
 
     # Funnel counts (all optional — record what you can measure)
     impressions: int | None = None
