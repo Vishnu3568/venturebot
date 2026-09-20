@@ -5,6 +5,7 @@ invalid monetary values, ID relationships, timestamps,
 and the allocated_budget vs actual_spend distinction.
 """
 
+from typing import Any
 from decimal import Decimal
 from uuid import uuid4
 
@@ -23,8 +24,11 @@ from venturebot.models.opportunity import Opportunity, OpportunityCategory, Oppo
 def test_opportunity_valid_creation():
     opp = Opportunity(
         title="Sell Notion templates",
-        description="Create and sell Notion productivity templates on Gumroad.",
+        description="Curated database of remote startup jobs sold as a Notion template.",
         category=OpportunityCategory.PRODUCT,
+        status=OpportunityStatus.DISCOVERED,
+        source="Reddit /r/SideProject",
+        evidence_notes="3 posts with >200 upvotes asking for this in last 30 days.",
     )
     assert opp.status == OpportunityStatus.DISCOVERED
     assert opp.confidence == 0.0
@@ -73,7 +77,7 @@ def test_opportunity_monetary_defaults():
 # ── Experiment ───────────────────────────────────────────────────────────────
 
 def _valid_experiment(**overrides) -> Experiment:
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         opportunity_id=uuid4(),
         hypothesis="Selling templates on Gumroad will generate ₹500 in 2 weeks.",
         objective="Revenue ≥ ₹500 in 14 days",
@@ -313,5 +317,5 @@ def test_capital_links_to_experiment():
 
 def test_decision_links_to_opportunity():
     opp_id = uuid4()
-    d = Decision(opportunity_id=opp_id, outcome=DecisionOutcome.REJECT if hasattr(DecisionOutcome, "REJECT") else DecisionOutcome.KILL, reason="too competitive")
+    d = Decision(opportunity_id=opp_id, outcome=getattr(DecisionOutcome, "REJECT", DecisionOutcome.KILL), reason="too competitive")
     assert d.opportunity_id == opp_id
