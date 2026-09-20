@@ -7,11 +7,12 @@ from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from venturebot.database.models import CapitalTransactionORM
+from venturebot.database.models import CapitalTransactionORM, ExperimentORM
 from venturebot.models.capital import CapitalTransaction, TransactionType
+from venturebot.models.experiment import ExperimentStatus
 
 STARTING_CAPITAL_AMOUNT = Decimal("1000.00")
 STARTING_CAPITAL_DESCRIPTION = "Initial starting capital ₹1,000.00"
@@ -27,6 +28,8 @@ class FinancialSummary(BaseModel):
     total_revenue: Decimal = Field(default=Decimal("0.00"))
     total_cost: Decimal = Field(default=Decimal("0.00"))
     net_profit: Decimal = Field(default=Decimal("0.00"))
+    total_allocated: Decimal = Field(default=Decimal("0.00"))
+    available_unallocated: Decimal = Field(default=Decimal("0.00"))
     roi: float | None = None
 
     @property
@@ -196,6 +199,9 @@ class CapitalRepository:
         if total_cost > Decimal("0.00"):
             roi = round(float(net_profit / total_cost), 4)
 
+        total_allocated = self.get_total_active_allocations()
+        available_unallocated = max(Decimal("0.00"), current_balance - total_allocated)
+
         return FinancialSummary(
             starting_capital=starting_capital,
             current_balance=current_balance,
@@ -204,12 +210,63 @@ class CapitalRepository:
             total_revenue=total_revenue,
             total_cost=total_cost,
             net_profit=net_profit,
+            total_allocated=total_allocated,
+            available_unallocated=available_unallocated,
             roi=roi,
         )
 
     def get_current_balance(self) -> Decimal:
         """Return current available capital in the pool."""
-        return self.get_financial_summary().current_balance
+        history = self.get_transaction_history()
+        total_inflow = Decimal("0.00")
+        total_outflow = Decimal("0.00")
+        for tx in history:
+            amount = tx.amount
+            if tx.transaction_type in (
+                TransactionType.INITIAL_DEPOSIT,
+                TransactionType.REVENUE,
+                TransactionType.EXPERIMENT_REFUND,
+            ):
+                total_inflow += amount
+            elif tx.transaction_type in (
+                TransactionType.EXPERIMENT_SPEND,
+                TransactionType.WITHDRAWAL,
+            ):
+                total_outflow += amount
+        return total_inflow - total_outflow
+
+    def get_experiment_actual_spend(self, experiment_id: UUID) -> Decimal:
+        """Calculate total actual spend for an experiment directly from the capital ledger."""
+        stmt = select(func.coalesce(func.sum(CapitalTransactionORM.amount), Decimal("0.00"))).where(
+            CapitalTransactionORM.experiment_id == experiment_id,
+            CapitalTransactionORM.transaction_type == TransactionType.EXPERIMENT_SPEND.value,
+        )
+        result = self.session.scalar(stmt)
+        if result is None:
+            return Decimal("0.00")
+        return result if isinstance(result, Decimal) else Decimal(str(result))
+
+    def get_total_active_allocations(self) -> Decimal:
+        """Sum committed allocation remaining for active (approved or running) experiments."""
+        stmt = select(ExperimentORM).where(
+            ExperimentORM.status.in_([ExperimentStatus.APPROVED.value, ExperimentStatus.RUNNING.value])
+        )
+        active_experiments = self.session.scalars(stmt).all()
+        total_allocated = Decimal("0.00")
+        for exp in active_experiments:
+            actual_spend = self.get_experiment_actual_spend(exp.id)
+            allocated = (
+                exp.allocated_budget
+                if isinstance(exp.allocated_budget, Decimal)
+                else Decimal(str(exp.allocated_budget))
+            )
+            remaining_allocated = max(Decimal("0.00"), allocated - actual_spend)
+            total_allocated += remaining_allocated
+        return total_allocated
+
+    def get_available_unallocated_capital(self) -> Decimal:
+        """Return liquid capital available for new experiment allocations (current_balance - active_allocations)."""
+        return max(Decimal("0.00"), self.get_current_balance() - self.get_total_active_allocations())
 
     @staticmethod
     def _to_pydantic(orm: CapitalTransactionORM) -> CapitalTransaction:
