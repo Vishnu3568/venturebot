@@ -32,11 +32,11 @@ class ExperimentMetrics(BaseModel):
     conversion_rate: float | None = Field(default=None, ge=0.0, le=1.0)
 
     # Money — Decimal to avoid float rounding on financial values
-    revenue: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    revenue: Decimal | None = Field(default=None, ge=Decimal("0"))
     cost: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
 
     # profit_loss is signed: positive = profit, negative = loss
-    profit_loss: Decimal = Decimal("0")
+    profit_loss: Decimal | None = Field(default=None)
 
     # Advertising efficiency metrics (optional — not all experiments use ads)
     roas: Decimal | None = None   # Revenue / Ad Spend; None if no ad spend
@@ -50,9 +50,10 @@ class ExperimentMetrics(BaseModel):
     @model_validator(mode="after")
     def profit_loss_consistent(self) -> "ExperimentMetrics":
         """Warn via ValueError if profit_loss contradicts revenue - cost when both are known."""
-        expected = self.revenue - self.cost
-        if self.profit_loss != Decimal("0") and self.profit_loss != expected:
-            # Allow caller to set it explicitly (e.g. when fees or adjustments apply),
-            # but catch the common mistake of leaving it at default when revenue/cost differ.
-            pass  # ponytail: no auto-correction; discrepancy is caller's responsibility
+        if self.revenue is not None and self.profit_loss is not None:
+            expected = self.revenue - self.cost
+            if self.profit_loss != Decimal("0") and self.profit_loss != expected:
+                # Allow caller to set it explicitly (e.g. when fees or adjustments apply),
+                # but catch the common mistake of leaving it at default when revenue/cost differ.
+                pass  # ponytail: no auto-correction; discrepancy is caller's responsibility
         return self
