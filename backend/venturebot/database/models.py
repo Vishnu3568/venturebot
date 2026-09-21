@@ -152,6 +152,18 @@ class ExperimentORM(Base):
         back_populates="experiment",
         cascade="all, delete-orphan",
     )
+    external_execution: Mapped[ExternalExecutionORM | None] = relationship(
+        "ExternalExecutionORM",
+        back_populates="experiment",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+    @property
+    def remaining_budget(self) -> Decimal:
+        """Remaining allocated funds available for this experiment."""
+        return max(Decimal("0.00"), self.allocated_budget - self.actual_spend)
+
 
 
 
@@ -173,14 +185,14 @@ class ExperimentMetricsORM(Base):
     conversions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     conversion_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    revenue: Mapped[Decimal] = mapped_column(
-        Numeric(precision=12, scale=2, asdecimal=True), default=Decimal("0.00")
+    revenue: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=12, scale=2, asdecimal=True), nullable=True, default=None
     )
     cost: Mapped[Decimal] = mapped_column(
         Numeric(precision=12, scale=2, asdecimal=True), default=Decimal("0.00")
     )
-    profit_loss: Mapped[Decimal] = mapped_column(
-        Numeric(precision=12, scale=2, asdecimal=True), default=Decimal("0.00")
+    profit_loss: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=12, scale=2, asdecimal=True), nullable=True, default=None
     )
 
     roas: Mapped[Decimal | None] = mapped_column(
@@ -269,4 +281,40 @@ class ExperimentLearningORM(Base):
         back_populates="learnings",
         foreign_keys=[decision_id],
     )
+
+
+class ExternalExecutionORM(Base):
+    """Authoritative record of the current external deployment for an Experiment."""
+    __tablename__ = "external_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("experiments.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    channel: Mapped[str] = mapped_column(String(50), nullable=False, default="meta")
+    external_account_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    campaign_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    adset_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    creative_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ad_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    image_hash: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending", index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dispatched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # Relationships
+    experiment: Mapped[ExperimentORM] = relationship("ExperimentORM", back_populates="external_execution")
 
