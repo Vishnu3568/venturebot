@@ -105,8 +105,8 @@ class MetricsRepository:
             conversion_rate=orm.conversion_rate,
             revenue=(
                 orm.revenue
-                if isinstance(orm.revenue, Decimal)
-                else Decimal(str(orm.revenue or 0))
+                if orm.revenue is None or isinstance(orm.revenue, Decimal)
+                else Decimal(str(orm.revenue))
             ),
             cost=(
                 orm.cost
@@ -115,8 +115,8 @@ class MetricsRepository:
             ),
             profit_loss=(
                 orm.profit_loss
-                if isinstance(orm.profit_loss, Decimal)
-                else Decimal(str(orm.profit_loss or 0))
+                if orm.profit_loss is None or isinstance(orm.profit_loss, Decimal)
+                else Decimal(str(orm.profit_loss))
             ),
             roas=(
                 orm.roas
