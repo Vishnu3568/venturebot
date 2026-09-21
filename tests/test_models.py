@@ -161,7 +161,13 @@ def test_metrics_all_optional_fields():
     assert m.impressions is None
     assert m.roas is None
     assert m.roi is None
-    assert m.revenue == Decimal("0")
+    assert m.revenue is None
+    assert m.profit_loss is None
+
+
+def test_metrics_explicit_zero_revenue_valid():
+    m = ExperimentMetrics(experiment_id=uuid4(), revenue=Decimal("0.00"), cost=Decimal("50.00"))
+    assert m.revenue == Decimal("0.00")
 
 
 def test_metrics_negative_revenue_rejected():
