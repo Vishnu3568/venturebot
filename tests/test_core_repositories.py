@@ -338,6 +338,43 @@ def test_metrics_foreign_key_enforced(session: Session):
         metrics_repo.create(m)
 
 
+def test_metrics_nullable_revenue_round_trip(session: Session):
+    """Persisting metrics with revenue=None and profit_loss=None retrieves cleanly as None."""
+    opp_repo = OpportunityRepository(session)
+    exp_repo = ExperimentRepository(session)
+    metrics_repo = MetricsRepository(session)
+
+    opp = opp_repo.create(Opportunity(title="Opp", description="d", category=OpportunityCategory.PRODUCT))
+    exp = exp_repo.create(Experiment(
+        opportunity_id=opp.id,
+        hypothesis="h",
+        objective="o",
+        channel=Channel.FACEBOOK,
+        monetization_method=MonetizationMethod.DIRECT_SALE,
+        allocated_budget=Decimal("100.00"),
+        max_allowed_spend=Decimal("100.00"),
+        success_criteria="s",
+        failure_criteria="f",
+    ))
+
+    m = ExperimentMetrics(
+        experiment_id=exp.id,
+        impressions=1000,
+        clicks=25,
+        cost=Decimal("50.00"),
+        revenue=None,
+        profit_loss=None,
+    )
+    saved = metrics_repo.create(m)
+    assert saved.revenue is None
+    assert saved.profit_loss is None
+
+    fetched = metrics_repo.get(saved.id)
+    assert fetched is not None
+    assert fetched.revenue is None
+    assert fetched.profit_loss is None
+
+
 # ── 5. Decision Repository Tests ─────────────────────────────────────────────
 
 def test_create_and_retrieve_decision_for_opportunity(session: Session):
