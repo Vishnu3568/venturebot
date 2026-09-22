@@ -82,3 +82,9 @@ class Experiment(BaseModel):
                 f"allocated_budget ({self.allocated_budget}) exceeds max_allowed_spend ({self.max_allowed_spend})"
             )
         return self
+
+    @property
+    def remaining_budget(self) -> Decimal:
+        """Remaining allocated funds available for this experiment."""
+        return max(Decimal("0.00"), self.allocated_budget - self.actual_spend)
+
