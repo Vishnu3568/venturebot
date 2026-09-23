@@ -7,11 +7,13 @@ from venturebot.database.models import (
     DecisionORM,
     ExperimentMetricsORM,
     ExperimentORM,
+    ExternalExecutionORM,
     OpportunityORM,
 )
 from venturebot.database.repositories.capital import CapitalRepository, FinancialSummary
 from venturebot.database.repositories.decision import DecisionRepository
 from venturebot.database.repositories.experiment import ExperimentRepository
+from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.database.repositories.metrics import MetricsRepository
 from venturebot.database.repositories.opportunity import OpportunityRepository
 
@@ -24,6 +26,8 @@ __all__ = [
     "ExperimentMetricsORM",
     "ExperimentORM",
     "ExperimentRepository",
+    "ExternalExecutionORM",
+    "ExternalExecutionRepository",
     "FinancialSummary",
     "MetricsRepository",
     "OpportunityORM",
