@@ -109,6 +109,7 @@ class ExperimentORM(Base):
     objective: Mapped[str] = mapped_column(Text, nullable=False)
     channel: Mapped[str] = mapped_column(String(50), nullable=False)
     monetization_method: Mapped[str] = mapped_column(String(50), nullable=False)
+    destination_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Budget ceilings
     allocated_budget: Mapped[Decimal] = mapped_column(

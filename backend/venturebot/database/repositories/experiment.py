@@ -48,6 +48,7 @@ class ExperimentRepository:
             objective=experiment.objective,
             channel=experiment.channel.value,
             monetization_method=experiment.monetization_method.value,
+            destination_url=experiment.destination_url,
             allocated_budget=experiment.allocated_budget,
             max_allowed_spend=experiment.max_allowed_spend,
             actual_spend=experiment.actual_spend,
@@ -120,6 +121,21 @@ class ExperimentRepository:
         actual_spend = self.get_actual_spend_from_ledger(experiment_id)
         return self._to_pydantic(orm, actual_spend=actual_spend)
 
+    def update_destination_url(self, experiment_id: UUID, destination_url: str | None) -> Experiment | None:
+        """Update the destination URL of an existing Experiment."""
+        orm = self.session.get(ExperimentORM, experiment_id)
+        if orm is None:
+            return None
+
+        orm.destination_url = destination_url
+        if self.auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+
+        actual_spend = self.get_actual_spend_from_ledger(experiment_id)
+        return self._to_pydantic(orm, actual_spend=actual_spend)
+
     @staticmethod
     def _to_pydantic(orm: ExperimentORM, actual_spend: Decimal | None = None) -> Experiment:
         """Map ExperimentORM to canonical Pydantic model."""
@@ -160,6 +176,7 @@ class ExperimentRepository:
             objective=orm.objective,
             channel=Channel(orm.channel),
             monetization_method=MonetizationMethod(orm.monetization_method),
+            destination_url=orm.destination_url,
             allocated_budget=(
                 orm.allocated_budget
                 if isinstance(orm.allocated_budget, Decimal)

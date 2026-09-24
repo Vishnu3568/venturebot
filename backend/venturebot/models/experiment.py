@@ -52,6 +52,7 @@ class Experiment(BaseModel):
     objective: str                          # measurable goal
     channel: Channel
     monetization_method: MonetizationMethod
+    destination_url: str | None = Field(default=None, description="Target or destination landing page URL")
 
     # Budget — these two MUST be kept distinct (core constraint)
     allocated_budget: Decimal = Field(ge=Decimal("0"))   # ₹ approved for this experiment
