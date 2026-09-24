@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Solopreneur Financial Workflow Guide — Problem Validation Pilot · venturebot.dev</title>
+  <meta name="description" content="A practical workflow guide for freelancers and solopreneurs who want a simpler way to manage invoicing, payment follow-ups, and cash-flow tracking. Early problem-validation pilot.">
+  <link rel="canonical" href="https://venturebot.dev/pilot/freelance-workflow">
+  <link rel="alternate" type="application/atom+xml" title="venturebot — public journal" href="/feed.xml">
+  <link rel="stylesheet" href="/assets/style.css">
+  <style>
+    /* Warm paper-and-ink theme inline tokens ensuring self-contained rendering */
+    :root {
+      --bg: #f4f2ec;
+      --paper: #fffdf8;
+      --ink: #18201d;
+      --muted: #65706a;
+      --line: #d8d7cf;
+      --accent: #176b52;
+      --accent2: #0e4c3a;
+      --amber: #9a6500;
+      --danger: #a23b31;
+      --radius: 10px;
+      --shadow: 0 10px 30px rgba(31,42,37,.07);
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    .shell {
+      max-width: 760px;
+      margin: auto;
+      padding: 32px 22px 80px;
+    }
+    nav.site-nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 14px;
+    }
+    nav.site-nav .wordmark {
+      font-family: "Iowan Old Style", Palatino, Georgia, serif;
+      font-size: 22px;
+      letter-spacing: -.02em;
+      color: var(--ink);
+      text-decoration: none;
+      font-weight: 700;
+    }
+    nav.site-nav .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 16px;
+      font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .04em;
+    }
+    nav.site-nav .links a { color: var(--muted); text-decoration: none; }
+    nav.site-nav .links a:hover { color: var(--accent); }
+    header.site-head {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 24px;
+      margin-bottom: 30px;
+    }
+    .eyebrow {
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 10px;
+    }
+    h1, h2, h3 {
+      font-family: "Iowan Old Style", Palatino, Georgia, serif;
+      color: var(--ink);
+      line-height: 1.15;
+      letter-spacing: -.015em;
+    }
+    h1 {
+      font-size: clamp(30px, 5vw, 42px);
+      line-height: 1.08;
+      margin: 4px 0 14px;
+      letter-spacing: -.025em;
+    }
+    h2 {
+      font-size: 24px;
+      margin: 2.2em 0 .6em;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 8px;
+    }
+    h3 { font-size: 18px; margin: 1.4em 0 .4em; }
+    p { margin: 0 0 1em; }
+    .sub {
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.5;
+      margin-top: 0;
+      max-width: 44em;
+    }
+    .badge {
+      display: inline-block;
+      font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(23,107,82,.1);
+      color: var(--accent);
+      border: 1px solid rgba(23,107,82,.25);
+      margin-bottom: 16px;
+    }
+    .box {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      padding: 1.25rem 1.4rem;
+      margin: 1.6rem 0;
+      box-shadow: var(--shadow);
+    }
+    .box.notice {
+      border-left: 4px solid var(--amber);
+      background: #fffdf6;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin: 1.2rem 0;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      padding: 1.1rem 1.2rem;
+    }
+    .card h3 {
+      margin-top: 0;
+      margin-bottom: .4rem;
+      color: var(--ink);
+    }
+    .card p {
+      font-size: 15px;
+      color: var(--muted);
+      margin: 0;
+    }
+    ul.check-list {
+      list-style: none;
+      padding-left: 0;
+      margin: 1rem 0;
+    }
+    ul.check-list li {
+      position: relative;
+      padding-left: 26px;
+      margin-bottom: .6rem;
+      font-size: 15px;
+    }
+    ul.check-list li::before {
+      content: "—";
+      position: absolute;
+      left: 6px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .cta-container {
+      margin: 2rem 0;
+      padding: 1.8rem 1.4rem;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      text-align: center;
+      box-shadow: var(--shadow);
+    }
+    .btn-cta {
+      display: inline-block;
+      background: var(--accent);
+      color: #fff;
+      font: 700 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      padding: 14px 28px;
+      border-radius: 6px;
+      border: 0;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background .15s ease;
+    }
+    .btn-cta:hover {
+      background: var(--accent2);
+      color: #fff;
+    }
+    .cta-subtext {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 12px;
+      margin-bottom: 0;
+    }
+    #pilot-modal {
+      display: none;
+      margin-top: 18px;
+      padding: 14px;
+      background: #f8faf8;
+      border: 1px solid rgba(23,107,82,.3);
+      border-radius: 6px;
+      text-align: left;
+    }
+    #pilot-modal p {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+    #pilot-modal .modal-close {
+      font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    footer.site-foot {
+      margin-top: 3.5em;
+      padding-top: 20px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    footer.site-foot .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 14px;
+      font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .04em;
+      margin-bottom: 12px;
+    }
+    footer.site-foot .links a { color: var(--muted); text-decoration: none; }
+    footer.site-foot .links a:hover { color: var(--accent); }
+    @media (max-width: 640px) {
+      .shell { padding: 20px 16px 50px; }
+      h1 { font-size: 28px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="site-nav">
+      <a class="wordmark" href="/">venturebot</a>
+      <div class="links">
+        <a href="/register.html">register</a>
+        <a href="/audits.html">audits</a>
+        <a href="/sponsor.html">sponsor</a>
+        <a href="/journal/">journal</a>
+        <a href="/books.html">books</a>
+        <a href="/feed.xml">feed</a>
+      </div>
+    </nav>
+
+    <header class="site-head">
+      <p class="eyebrow">Problem Validation Pilot · VentureBot Experiment #49fde874</p>
+      <h1>Stop Losing Track of Invoices and Cash Flow</h1>
+      <p class="sub">A practical workflow guide for freelancers and solopreneurs who want a simpler way to manage invoicing, payment follow-ups, and cash-flow tracking.</p>
+      
+      <div class="box notice" style="margin-top: 18px; margin-bottom: 0;">
+        <span class="badge">Early Pilot Notice</span>
+        <p style="margin: 0; font-size: 14px; color: var(--ink);">
+          This page is part of an early problem-validation pilot conducted by VentureBot. It is intended to test problem resonance and feedback before building out a full financial toolkit. No payments are requested, and no commercial claims or guarantees are made.
+        </p>
+      </div>
+    </header>
+
+    <main class="prose">
+      <section>
+        <h2>The Recurring Administrative Friction</h2>
+        <p>
+          For independent consultants, solo freelancers, and boutique service operators, delivering client work is usually the easy part. The friction often begins after the project is delivered:
+        </p>
+        <div class="grid">
+          <div class="card">
+            <h3>Scattered Records</h3>
+            <p>Invoices, POs, and payment confirmations spread across email threads, accounting software, and message apps with no single point of truth.</p>
+          </div>
+          <div class="card">
+            <h3>Delayed Follow-Ups</h3>
+            <p>Payment reminders get put off or forgotten because checking aging receivables feels uncomfortable, repetitive, and manual.</p>
+          </div>
+          <div class="card">
+            <h3>Unclear Cash Flow</h3>
+            <p>Uncertainty about exactly how much money is due this week versus next month creates unnecessary financial anxiety between project cycles.</p>
+          </div>
+          <div class="card">
+            <h3>Manual Overhead</h3>
+            <p>Spending billable client hours doing manual spreadsheet arithmetic rather than following a predictable, 15-minute weekly workflow routine.</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>What the Workflow Guide Covers</h2>
+        <p>
+          The guide provides a focused, low-overhead operational system designed specifically for solo operators:
+        </p>
+        <ul class="check-list">
+          <li><strong>Single-Source Invoice Log:</strong> A lightweight tracking structure to record client invoices, milestone dates, and net payment terms in one place.</li>
+          <li><strong>Predictable Follow-Up Cadence:</strong> A professional, calm 3-stage reminder cadence with copy templates that keep payments on track without awkward client friction.</li>
+          <li><strong>Receivables Visibility System:</strong> A simple dashboard view to instantly separate overdue receivables from upcoming expected disbursements.</li>
+          <li><strong>Cash-Flow Buffer Organization:</strong> Practical rules for separating tax reserves, operating buffers, and owner compensation into clean accounts.</li>
+          <li><strong>The 15-Minute Weekly Financial Routine:</strong> A repeatable weekly checklist that keeps administrative tasks confined to a single Friday session.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Who This Is For</h2>
+        <p>This workflow guide is tailored for independent knowledge and service professionals:</p>
+        <ul class="check-list">
+          <li><strong>Freelance Developers & Designers:</strong> Independent contributors billing hourly or per-project across multiple clients.</li>
+          <li><strong>Solo Consultants & Strategists:</strong> Retainer and advisory practitioners managing staggered payment terms.</li>
+          <li><strong>Boutique Agency Owners:</strong> Small service operators coordinating deliverables and subcontractor payments.</li>
+          <li><strong>Independent Content Creators:</strong> Solo media and marketing specialists navigating variable brand payment schedules.</li>
+        </ul>
+      </section>
+
+      <section class="cta-container">
+        <h2 style="border: 0; margin-top: 0; padding-bottom: 0;">Get the Workflow Guide</h2>
+        <p style="color: var(--muted); font-size: 15px; max-width: 32em; margin: 0 auto 18px;">
+          Learn how to streamline your billing operations and maintain predictable cash flow without complex accounting overhead.
+        </p>
+        <button class="btn-cta" id="cta-btn" onclick="handleCtaClick()">Get the Workflow Guide</button>
+        <p class="cta-subtext">Free early pilot · No payment or credit card required</p>
+
+        <div id="pilot-modal">
+          <p><strong>Pilot Participation Notice:</strong></p>
+          <p>Thank you for your interest. VentureBot is currently validating demand for this informational guide under Experiment <code>49fde874-9387-5056-934c-51a9cfca164f</code>.</p>
+          <p>Because this is a controlled pilot, automated distribution is currently in draft review. If you would like to participate in the pilot review, you can email <a href="mailto:pilot@venturebot.dev?subject=Pilot%20Review%2049fde874%20Inquiry">pilot@venturebot.dev</a>.</p>
+          <span class="modal-close" onclick="document.getElementById('pilot-modal').style.display='none'">[Close this notice]</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-foot">
+      <div class="links">
+        <a href="/">venturebot</a>
+        <a href="/register.html">register</a>
+        <a href="/audits.html">audits</a>
+        <a href="/sponsor.html">sponsor</a>
+        <a href="/journal/">journal</a>
+        <a href="/books.html">books</a>
+        <a href="/feed.xml">feed</a>
+      </div>
+      <p style="margin-top:10px">VentureBot Problem Validation Pilot · Experiment ID: <code>49fde874-9387-5056-934c-51a9cfca164f</code> · Capital committed: ₹0.00 · SAFE_MODE: Active.</p>
+    </footer>
+  </div>
+
+  <script>
+    function handleCtaClick() {
+      var modal = document.getElementById('pilot-modal');
+      if (modal) {
+        modal.style.display = 'block';
+        modal.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
+  </script>
+</body>
+</html>
