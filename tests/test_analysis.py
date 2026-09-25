@@ -359,3 +359,247 @@ def test_analysis_with_nullable_revenue_handles_unknown_gracefully(
     assert not any("Latest recorded revenue" in s for s in obs_statements)
     assert not any("Latest recorded profit/loss" in s for s in obs_statements)
     assert any("Missing/unmeasured" in s for s in obs_statements)
+
+
+# ── 5. Step 46 Reporting-Window Checkpoint Resolution ─────────────────────────
+
+def test_same_reporting_window_restatement_produces_no_sequential_delta(
+    session: Session, running_experiment: Experiment
+):
+    """Same reporting window original + restatement: only latest observation becomes checkpoint, zero deltas."""
+    # Window W1 original (spend 50, clicks 20)
+    m_orig = ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-01:2026-09-02",
+            cost=Decimal("50.00"),
+            impressions=1000,
+            clicks=20,
+            recorded_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    # Window W1 restatement (spend 55, clicks 22, later recorded_at)
+    m_restated = ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-01:2026-09-02",
+            cost=Decimal("55.00"),
+            impressions=1000,
+            clicks=22,
+            recorded_at=datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    analysis = ExperimentAnalysisService.analyze(session, running_experiment.id)
+
+    # Total measurements counts raw rows in DB
+    assert analysis.total_measurements == 2
+    # Resolved checkpoint is latest observation (the restatement)
+    assert analysis.latest_measurement is not None
+    assert analysis.latest_measurement.id == m_restated.id
+    assert analysis.financial_summary["cost"] == Decimal("55.00")
+
+    # RESTATEMENT != NEW PERFORMANCE PERIOD: no sequential delta fabricated
+    assert analysis.changes_from_previous == []
+    inference_obs = [o for o in analysis.observations if o.category == EvidenceCategory.INFERENCE]
+    assert len(inference_obs) == 0
+
+
+def test_restated_window_with_subsequent_window_computes_correct_delta(
+    session: Session, running_experiment: Experiment
+):
+    """Sequential delta compares latest(W1) -> W2, not W1(orig) -> W1(restatement)."""
+    # W1 original (cost 50, clicks 20)
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-01:2026-09-02",
+            cost=Decimal("50.00"),
+            clicks=20,
+            recorded_at=datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    # W1 restatement (cost 55, clicks 25)
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-01:2026-09-02",
+            cost=Decimal("55.00"),
+            clicks=25,
+            recorded_at=datetime(2026, 9, 2, 18, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    # W2 (cost 70, clicks 35)
+    m_w2 = ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-03:2026-09-04",
+            cost=Decimal("70.00"),
+            clicks=35,
+            recorded_at=datetime(2026, 9, 4, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    analysis = ExperimentAnalysisService.analyze(session, running_experiment.id)
+
+    assert analysis.total_measurements == 3
+    assert analysis.latest_measurement is not None
+    assert analysis.latest_measurement.id == m_w2.id
+    assert analysis.financial_summary["cost"] == Decimal("70.00")
+
+    delta_map = {d.metric_name: d for d in analysis.changes_from_previous}
+    assert "cost" in delta_map
+    # Compares latest W1 (55) -> W2 (70), delta = +15 (NOT 50 -> 55, delta = +5)
+    assert delta_map["cost"].previous_value == Decimal("55.00")
+    assert delta_map["cost"].latest_value == Decimal("70.00")
+    assert delta_map["cost"].absolute_change == Decimal("15.00")
+
+    assert "clicks" in delta_map
+    assert delta_map["clicks"].previous_value == 25
+    assert delta_map["clicks"].latest_value == 35
+    assert delta_map["clicks"].absolute_change == 10
+
+
+def test_conceptual_scenario_with_named_windows(
+    session: Session, running_experiment: Experiment
+):
+    """Section 6 conceptual scenario: W1(50, T1), W1(55, T2), W2(70, T3) -> delta = +15."""
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="W1",
+            cost=Decimal("50.00"),
+            recorded_at=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="W1",
+            cost=Decimal("55.00"),
+            recorded_at=datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="W2",
+            cost=Decimal("70.00"),
+            recorded_at=datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    analysis = ExperimentAnalysisService.analyze(session, running_experiment.id)
+
+    assert analysis.total_measurements == 3
+    delta_map = {d.metric_name: d for d in analysis.changes_from_previous}
+    assert delta_map["cost"].previous_value == Decimal("55.00")
+    assert delta_map["cost"].latest_value == Decimal("70.00")
+    assert delta_map["cost"].absolute_change == Decimal("15.00")
+
+
+def test_later_arriving_restatement_preserves_chronological_checkpoint_ordering(
+    session: Session, running_experiment: Experiment
+):
+    """When a restatement for W1 is recorded at T3 (after W2 was recorded at T2),
+    W1 is still ordered before W2 in checkpoints, and latest(W1) -> W2 is compared."""
+    # W1 original (T1)
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-01:2026-09-02",
+            cost=Decimal("50.00"),
+            recorded_at=datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+    # W2 (T2)
+    m_w2 = ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-03:2026-09-04",
+            cost=Decimal("70.00"),
+            recorded_at=datetime(2026, 9, 4, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+    # W1 restatement arrives at T3 > T2
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="meta:insights:campaign:12345:2026-09-01:2026-09-02",
+            cost=Decimal("55.00"),
+            recorded_at=datetime(2026, 9, 5, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    analysis = ExperimentAnalysisService.analyze(session, running_experiment.id)
+
+    assert analysis.total_measurements == 3
+    # Latest chronological performance checkpoint is W2
+    assert analysis.latest_measurement is not None
+    assert analysis.latest_measurement.id == m_w2.id
+    assert analysis.financial_summary["cost"] == Decimal("70.00")
+
+    delta_map = {d.metric_name: d for d in analysis.changes_from_previous}
+    assert delta_map["cost"].previous_value == Decimal("55.00")
+    assert delta_map["cost"].latest_value == Decimal("70.00")
+    assert delta_map["cost"].absolute_change == Decimal("15.00")
+
+
+def test_unwindowed_observations_without_source_reference_retain_sequential_deltas(
+    session: Session, running_experiment: Experiment
+):
+    """Measurements with empty source_reference each remain distinct checkpoints."""
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="",
+            cost=Decimal("10.00"),
+            recorded_at=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+    ExperimentMeasurementService.record_measurement(
+        session,
+        ExperimentMetrics(
+            experiment_id=running_experiment.id,
+            evidence_type=EvidenceCategory.FACT,
+            source_reference="",
+            cost=Decimal("25.00"),
+            recorded_at=datetime(2026, 9, 2, 10, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    analysis = ExperimentAnalysisService.analyze(session, running_experiment.id)
+
+    assert analysis.total_measurements == 2
+    delta_map = {d.metric_name: d for d in analysis.changes_from_previous}
+    assert delta_map["cost"].previous_value == Decimal("10.00")
+    assert delta_map["cost"].latest_value == Decimal("25.00")
+    assert delta_map["cost"].absolute_change == Decimal("15.00")
+
