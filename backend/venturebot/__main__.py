@@ -60,6 +60,21 @@ from venturebot.opportunity.trend import ResearchTrendAnalyzer
 from venturebot.opportunity.wikimedia import WikimediaPageviewsAdapter
 
 
+def _format_currency_obs(val: Decimal | None, prefix: str = "INR ") -> str:
+    """Format a nullable currency observation (e.g. revenue, profit/loss)."""
+    return f"{prefix}{val:.2f}" if val is not None else "Unmeasured"
+
+
+def _format_percent_obs(val: float | None, precision: int = 1) -> str:
+    """Format a nullable observation percentage (e.g. conversion_rate, roi)."""
+    return f"{val * 100:.{precision}f}%" if val is not None else "Unmeasured"
+
+
+def _format_roas_obs(val: Decimal | float | None) -> str:
+    """Format a nullable ROAS / ratio observation."""
+    return f"{val:.2f}x" if val is not None else "Unmeasured"
+
+
 def run_smoke_test(
     db_url: str = "sqlite:///:memory:",
     offline: bool = False,
@@ -299,11 +314,13 @@ def run_smoke_test(
         )
         recorded_metrics = ExperimentMeasurementService.record_measurement(session, simulated_metrics)
         print(f"  [OK] Telemetry Recorded (Snapshot ID: {recorded_metrics.id})")
-        conv_rate_str = f"{(recorded_metrics.conversion_rate or 0.0) * 100:.2f}%"
-        roi_str = f"{(recorded_metrics.roi or 0.0) * 100:.1f}%"
-        print(f"  [OK] Conversion Rate: {conv_rate_str} (4 conversions / 28 visitors)")
-        rev_val_str = f"INR {recorded_metrics.revenue:.2f}" if recorded_metrics.revenue is not None else "Unmeasured"
-        pl_val_str = f"INR {recorded_metrics.profit_loss:.2f}" if recorded_metrics.profit_loss is not None else "Unmeasured"
+        conv_rate_str = _format_percent_obs(recorded_metrics.conversion_rate, precision=2)
+        roi_str = _format_percent_obs(recorded_metrics.roi, precision=1)
+        conv_count_str = f"{recorded_metrics.conversions}" if recorded_metrics.conversions is not None else "Unmeasured"
+        visitor_count_str = f"{recorded_metrics.visitors}" if recorded_metrics.visitors is not None else "Unmeasured"
+        print(f"  [OK] Conversion Rate: {conv_rate_str} ({conv_count_str} conversions / {visitor_count_str} visitors)")
+        rev_val_str = _format_currency_obs(recorded_metrics.revenue)
+        pl_val_str = _format_currency_obs(recorded_metrics.profit_loss)
         print(f"  [OK] Measured Experiment Revenue: {rev_val_str} (telemetry observation, NOT ledger cash)")
         print(f"  [OK] Measured Experiment Profit/Loss: {pl_val_str} (metric-level calculation)")
         print(f"  [OK] Measured Experiment ROI: {roi_str}")
@@ -373,8 +390,8 @@ def run_smoke_test(
         print(f"  [OK] Synthesized Intelligence for Opportunity '{intel.opportunity.title}' (Category: {intel.opportunity.category.value.upper()})")
         print(f"  [OK] Total Experiments Run: {intel.total_experiments}")
         print(f"  [OK] Total Authoritative Ledger Spend: INR {intel.total_actual_spend:.2f}")
-        total_rev_str = f"INR {intel.total_measured_revenue:.2f}" if intel.total_measured_revenue is not None else "Unmeasured"
-        net_pl_str = f"INR {intel.net_measured_profit_loss:.2f}" if intel.net_measured_profit_loss is not None else "Unmeasured"
+        total_rev_str = _format_currency_obs(intel.total_measured_revenue)
+        net_pl_str = _format_currency_obs(intel.net_measured_profit_loss)
         print(f"  [OK] Total Measured Experiment Revenue: {total_rev_str} (telemetry observation)")
         print(f"  [OK] Net Measured Experiment Profit/Loss: {net_pl_str} (metric-level calculation)")
         print(f"  [OK] Accumulated Learnings Logged: {len(intel.accumulated_learnings)}")
@@ -398,11 +415,13 @@ def run_smoke_test(
         print(f"     Ledger Net Profit/Loss:          INR {final_summary.net_profit:.2f} (authoritative capital net flow)")
 
         print("\n  EXPERIMENT-LEVEL MEASURED METRICS (NOT LEDGER CASH):")
-        print(f"  5. Measured Experiment Revenue:     INR {recorded_metrics.revenue:.2f} (simulated trial telemetry)")
-        print(f"  6. Measured Experiment Profit/Loss: INR {recorded_metrics.profit_loss:.2f} (metric-level calculation)")
-        final_conv_str = f"{(recorded_metrics.conversion_rate or 0.0) * 100:.2f}%"
-        final_roi_str = f"{(recorded_metrics.roi or 0.0) * 100:.1f}%"
-        print(f"     Measured Conversion Rate:        {final_conv_str} ({recorded_metrics.conversions} conversions / {recorded_metrics.visitors} visitors)")
+        print(f"  5. Measured Experiment Revenue:     {_format_currency_obs(recorded_metrics.revenue)} (simulated trial telemetry)")
+        print(f"  6. Measured Experiment Profit/Loss: {_format_currency_obs(recorded_metrics.profit_loss)} (metric-level calculation)")
+        final_conv_str = _format_percent_obs(recorded_metrics.conversion_rate, precision=2)
+        final_roi_str = _format_percent_obs(recorded_metrics.roi, precision=1)
+        final_conv_count = f"{recorded_metrics.conversions}" if recorded_metrics.conversions is not None else "Unmeasured"
+        final_visitor_count = f"{recorded_metrics.visitors}" if recorded_metrics.visitors is not None else "Unmeasured"
+        print(f"     Measured Conversion Rate:        {final_conv_str} ({final_conv_count} conversions / {final_visitor_count} visitors)")
         print(f"     Measured Trial ROI:              {final_roi_str}")
 
         print(f"\n  Total Authoritative Ledger Transactions: {len(tx_history)}")
