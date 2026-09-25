@@ -6,6 +6,7 @@ Strictly read-only: does not modify the capital ledger or create decisions.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -49,8 +50,96 @@ NUMERIC_COMPARE_FIELDS: tuple[str, ...] = (
 )
 
 
+def _normalize_dt(dt: datetime) -> datetime:
+    """Ensure datetime has UTC timezone for safe comparison."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _parse_window_dates(source_ref: str) -> tuple[datetime, datetime] | None:
+    """Parse start and stop datetimes from a canonical Meta campaign reporting-window string."""
+    if not source_ref or not source_ref.startswith("meta:insights:campaign:"):
+        return None
+    parts = source_ref.split(":")
+    if len(parts) >= 6:
+        try:
+            start_date = date.fromisoformat(parts[-2])
+            stop_date = date.fromisoformat(parts[-1])
+            start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+            stop_dt = datetime.combine(stop_date, datetime.max.time(), tzinfo=timezone.utc)
+            return (start_dt, stop_dt)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 class ExperimentAnalysisService:
     """Read-only deterministic service for analyzing recorded experiment metrics."""
+
+    @classmethod
+    def _resolve_checkpoints(
+        cls,
+        measurements: list[ExperimentMetrics],
+    ) -> list[ExperimentMetrics]:
+        """Resolve measurement observations into chronological performance checkpoints.
+
+        Locked Semantics (Section 24.7 of Architecture):
+        - RESTATEMENT != NEW PERFORMANCE PERIOD.
+        - Measurements that do NOT have a reporting-window source_reference (empty or whitespace)
+          retain their existing behavior as distinct individual checkpoints.
+        - Measurements that share a logical reporting-window identity (source_reference)
+          are grouped together.
+        - Within each logical reporting window, the latest observation by recorded_at DESC
+          is selected as the authoritative checkpoint observation.
+        - Resolved checkpoints are ordered chronologically by reporting-window delivery
+          date semantics if available (e.g. Meta start/stop dates), or by the window's
+          earliest observation timestamp and appearance order.
+        """
+        if not measurements:
+            return []
+
+        appearance_index: dict[UUID, int] = {m.id: idx for idx, m in enumerate(measurements)}
+
+        # Group observations by logical reporting window
+        # Unwindowed observations (empty or whitespace source_reference) each get their own unique group.
+        grouped: dict[str | tuple[str, UUID], list[ExperimentMetrics]] = {}
+        for m in measurements:
+            ref = m.source_reference.strip() if m.source_reference else ""
+            if ref:
+                key: str | tuple[str, UUID] = ref
+            else:
+                key = ("__unwindowed__", m.id)
+
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(m)
+
+        # For each group, select the latest observation by recorded_at DESC (and appearance order)
+        # and compute the chronological sort key for the window.
+        resolved_windows: list[tuple[tuple[datetime, datetime, int], ExperimentMetrics]] = []
+        for key, obs_list in grouped.items():
+            latest_obs = max(
+                obs_list,
+                key=lambda m: (_normalize_dt(m.recorded_at), appearance_index.get(m.id, 0)),
+            )
+
+            first_idx = min(appearance_index.get(m.id, 0) for m in obs_list)
+            if isinstance(key, str):
+                parsed = _parse_window_dates(key)
+                if parsed is not None:
+                    sort_key = (parsed[0], parsed[1], first_idx)
+                else:
+                    earliest_dt = min(_normalize_dt(m.recorded_at) for m in obs_list)
+                    sort_key = (earliest_dt, earliest_dt, first_idx)
+            else:
+                earliest_dt = min(_normalize_dt(m.recorded_at) for m in obs_list)
+                sort_key = (earliest_dt, earliest_dt, first_idx)
+
+            resolved_windows.append((sort_key, latest_obs))
+
+        resolved_windows.sort(key=lambda item: item[0])
+        return [item[1] for item in resolved_windows]
 
     @classmethod
     def analyze(
@@ -98,7 +187,8 @@ class ExperimentAnalysisService:
                 ],
             )
 
-        latest: ExperimentMetrics = measurements[-1]
+        checkpoints = cls._resolve_checkpoints(measurements)
+        latest: ExperimentMetrics = checkpoints[-1]
 
         # 1. Determine available vs missing metrics on latest snapshot
         available: list[str] = []
@@ -192,10 +282,10 @@ class ExperimentAnalysisService:
                 )
             )
 
-        # 4. Measure-to-measure changes if 2+ measurements exist
+        # 4. Measure-to-measure changes between checkpoints if 2+ distinct checkpoints exist
         changes: list[MetricDelta] = []
-        if len(measurements) >= 2:
-            prev: ExperimentMetrics = measurements[-2]
+        if len(checkpoints) >= 2:
+            prev: ExperimentMetrics = checkpoints[-2]
             for field in NUMERIC_COMPARE_FIELDS:
                 prev_val = getattr(prev, field, None)
                 latest_val = getattr(latest, field, None)
@@ -235,7 +325,7 @@ class ExperimentAnalysisService:
                         PerformanceObservation(
                             category=EvidenceCategory.INFERENCE,
                             statement=stmt,
-                            source_reference=f"Comparison between snapshot {len(measurements)-1} and {len(measurements)}",
+                            source_reference=f"Comparison between checkpoint {len(checkpoints)-1} and {len(checkpoints)}",
                         )
                     )
 
