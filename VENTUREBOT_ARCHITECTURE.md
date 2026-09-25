@@ -481,4 +481,156 @@ The agent must treat these files as the immutable source of truth. After complet
 - Current repository state (`git status --short`)
 
 ---
+
+## 22. External Execution Identity, Reconciliation & Retry Invariants (Step 39.3 Contract Lock)
+
+To guarantee idempotency and eliminate duplicate resource creation during network interruptions, timeouts, and process crashes, VentureBot locks the following external execution rules:
+
+### 1. The Global Reconciliation Invariant
+An external write (POST) is allowed **ONLY** after the system has established:
+`"The intended external resource does not currently exist."`
+- Lookup failures, socket timeouts, HTTP 403, 429, 500, or network errors must **NEVER** be interpreted as `NOT_FOUND`.
+- `UNKNOWN` status strictly mandates: **NO POST**.
+
+### 2. Lookup Result Taxonomy
+Every reconciliation lookup must evaluate to exactly one of:
+- **`NOT_FOUND`**: Verified remote lookup returned zero matching candidates. $\rightarrow$ **POST allowed**.
+- **`FOUND_EXACT`**: Verified remote lookup returned exactly one candidate matching all required identity, parent, and status (`PAUSED`) constraints. $\rightarrow$ **ADOPT external ID**.
+- **`AMBIGUOUS`**: Lookup returned multiple possible matches or insufficiently distinguishable candidates. $\rightarrow$ **STOP dispatch** (surface error; never guess).
+- **`UNKNOWN`**: Lookup failed due to timeout, socket drop, HTTP error, or malformed response. $\rightarrow$ **STOP dispatch** (never POST).
+
+### 3. Hierarchical Identity & Scoping Chain
+1. **Experiment:** Canonical UUID (`experiment_id`).
+2. **Campaign:** Deterministic name `VB-EXP-<experiment_id>`, scoped to Ad Account.
+3. **Ad Set:** Deterministic name `VB-EXP-<experiment_id>-ADSET`, strictly scoped to parent `campaign_id` (supporting fields: `lifetime_budget` in minor currency units/paise, required `end_time`, `billing_event='IMPRESSIONS'`, `optimization_goal='LINK_CLICKS'`).
+4. **Creative:** Deterministic name `VB-EXP-<experiment_id>-CREATIVE`, scoped to Ad Account and verified against `object_story_spec`.
+5. **Ad:** Deterministic name `VB-EXP-<experiment_id>-AD`, strictly scoped to parent `adset_id`.
+6. **Image:** Content-addressed MD5 hash; inherently idempotent by payload checksum.
+
+### 4. Adoption & Retry Semantics
+- If an external ID is already known locally in `ExternalExecution`, it is reused without recreation.
+- If an external ID is missing locally, remote lookup is attempted before POST. If an exact matching resource exists remotely in `PAUSED` status, its ID is adopted and persisted.
+- Retrying an interrupted dispatch always resumes from the first missing/unverified tier; it never replays from scratch.
+- Zero financial side effects: reconciliation and adoption never mutate the capital ledger.
+
+---
+
+## 23. Execution Dispatch Architecture & Write Gateway Boundaries (Step 40.1 Consolidation)
+
+To ensure exactly **ONE** unambiguous, auditable authorization and execution path for all external write operations, VentureBot locks the following structural boundaries:
+
+### 1. Component Responsibilities
+- **`ExecutionDispatchService` (Tier 1 — Governance & Safety Gate):**
+  - The authoritative, channel-agnostic write gateway.
+  - Validates experiment existence, domain status (`APPROVED`), allocated capital presence (`allocated_budget > 0`), and budget ceilings (`proposed_budget <= remaining_budget`).
+  - Enforces the global `SAFE_MODE` guardrail (`VENTUREBOT_SAFE_MODE`, default: `True`), unconditionally blocking write actions when active.
+- **`MetaExperimentDispatchService` (Tier 2 — Channel Deployment Coordinator):**
+  - Channel-specific execution coordinator for Meta Marketing API deployments.
+  - Enforces Meta pre-dispatch safeguards (`spec.explicit_dispatch_authorized`, account currency `INR`, active account status, lifetime budget and `end_time` bounds).
+  - Coordinates sequential creation and reconciliation across the 5 tiers (Campaign $\rightarrow$ Image $\rightarrow$ Ad Set $\rightarrow$ Creative $\rightarrow$ Ad) in controlled `PAUSED` status.
+  - Updates `ExternalExecution` persistence after each tier and initiates handoff to `ExperimentExecutionService.start()` upon full deployment.
+- **`MetaMarketingApiAdapter` (Low-Level Transport):**
+  - Stateless HTTP client communicating directly with Meta Graph API endpoints.
+  - Strictly limited to payload construction, URL assembly, network transport, response parsing, and credential sanitization. Contains no lifecycle or business logic.
+- **`ExternalExecutionRepository` (State Persistence):**
+  - Atomic data access layer for `ExternalExecutionORM` records maintaining 1-to-1 linkage with domain experiments.
+
+### 2. Mandatory Write Call Graph
+All future real-world external execution actions must strictly follow this single linear hierarchy:
+```
+Human Operator / Approved Domain Action
+             │
+             ▼
+ExecutionDispatchService (Tier 1: Generic Safety & SAFE_MODE Gateway)
+             │ (validates approval, budget ceiling, checks SAFE_MODE)
+             ▼
+Channel Dispatcher [MetaExperimentDispatchService] (Tier 2: Deployment Coordinator)
+             │ (validates spec, verifies account, reconciles external tiers)
+             ▼
+Channel Adapter [MetaMarketingApiAdapter] (Low-Level Transport)
+             │ (HTTP client)
+             ▼
+External Platform (Meta Graph API)
+```
+
+### 3. Direct Channel Dispatcher Bypass Invariant (Blocking Gap)
+- Direct invocation of `MetaExperimentDispatchService` bypassing `ExecutionDispatchService` and `SAFE_MODE` is strictly classified as a **BLOCKING ARCHITECTURE GAP**.
+- In the consolidated architecture, `MetaExperimentDispatchService` must never serve as an un-gated entry point. It must either:
+  1. Be invoked exclusively by `ExecutionDispatchService`, OR
+  2. Embed an explicit `is_safe_mode()` check before initiating any remote write or reconciliation operation.
+
+### 4. SAFE_MODE Semantics
+- `VENTUREBOT_SAFE_MODE` defaults to `True`.
+- When `True`, all write dispatches are unconditionally blocked with `{success: False, blocked: True, reason: "SAFE_MODE_ENABLED"}`.
+- Setting `VENTUREBOT_SAFE_MODE=false` **NEVER** authorizes execution on its own. All domain prerequisites (approved status, budget ceilings, explicit operator authorization, account preflight, and deterministic reconciliation) remain mandatory.
+- Reconciliation and dispatch operations have strictly **zero financial side effects** on the authoritative capital ledger.
+
+---
+
+## 24. Meta Telemetry Ingestion, Idempotency & Restatement Contract (Step 43.1 / 43.1.1 Contract Lock)
+
+To guarantee measurement accuracy, preserve complete audit provenance, and handle upstream Meta reporting revisions without corrupting data or the financial ledger, VentureBot locks the following telemetry ingestion rules:
+
+### 1. Conceptual Model: Option C (Immutable Observations + Logical Reporting Window Identity)
+- VentureBot rejects in-place record overwrites (**Option B**) to preserve historical evidence provenance as required by Section 17 (`EvidenceCategory.FACT`).
+- VentureBot rejects indiscriminate snapshot appending (**Option A**) to prevent database bloat and catastrophic distortion of progressive metric analysis.
+- VentureBot adopts **Option C**: Every ingested observation is an immutable record, mapped to a deterministic **Logical Reporting Window**. Repeated identical observations are deduplicated (no-op). Legitimate Meta restatements append a new immutable observation with the same logical identity, where the latest record by `recorded_at` represents the authoritative measurement for that window.
+
+### 2. Disambiguation of Key Concepts
+1. **Logical Reporting Window:**
+   The external reporting scope being observed:
+   `experiment_id` + `channel` ('meta') + `account_id` + `object_id` (campaign ID) + `level` ('campaign') + `date_start` + `date_stop`.
+2. **Observation:**
+   An immutable `EvidenceCategory.FACT` snapshot received from Meta for that logical reporting window at a particular `recorded_at` timestamp, yielding specific numeric measurements: `(spend, impressions, clicks)`.
+3. **Performance Checkpoint:**
+   A logically distinct reporting window or observation period that can represent chronological progression for performance analysis over time.
+   
+> [!IMPORTANT]
+> **Core Disambiguation Invariant:**
+> A newer observation (such as a RESTATEMENT) of the SAME logical reporting window is **NOT** automatically a new performance checkpoint! A restatement represents revised historical accuracy for an existing window, not business progression into a new period.
+
+### 3. Campaign-Level Scope of Canonical Identity (`source_reference`)
+- The canonical identifier for a Meta reporting observation window is:
+  `meta:insights:campaign:<campaign_id>:<date_start>:<date_stop>`
+- **Step 44 Current Scope:**
+  This identifier is scoped strictly to campaign-level Meta telemetry for the single campaign deployed per experiment. It is not assumed to be universally sufficient for all future Meta aggregation levels (such as ad set, ad, or breakdown levels); any future multi-level telemetry contracts must be explicitly locked before implementation.
+- **API Version Exclusion Invariant:**
+  The Meta Graph API version (e.g. `v20.0`) must **NOT** be included in the logical identity string. API versions reflect transport protocols, not the identity of the underlying advertising event. Upgrading the API version must never cause identical historical windows to be re-ingested as new data. API version information belongs exclusively in transport audit metadata.
+
+### 4. Idempotency Rule (Exact Duplicate $\rightarrow$ NO-OP)
+- When a fetched observation matches an existing record's `experiment_id` and `source_reference`, and all observed numeric values (`cost`/`spend`, `impressions`, `clicks`) are identical:
+  - Action: **IDEMPOTENT NO-OP**.
+  - No new row is inserted into `experiment_metrics`.
+  - The existing measurement record is returned.
+
+### 5. Restatement Rule (Changed Values $\rightarrow$ Append with Provenance)
+- When a fetched observation matches an existing record's `experiment_id` and `source_reference`, but any observed numeric value (`cost`/`spend`, `impressions`, `clicks`) has changed:
+  - Action: **APPEND RESTATEMENT**.
+  - A new immutable `ExperimentMetrics` row is persisted with `evidence_type = EvidenceCategory.FACT`, `recorded_at = datetime.now(timezone.utc)`, and identical `source_reference`.
+  - The restatement preserves the same logical reporting-window identity (`source_reference`), receives a new `recorded_at`, remains immutable, remains `EvidenceCategory.FACT`, does NOT mutate the previous observation, does NOT create a financial ledger transaction, does NOT create an `ExperimentDecision`, and does **NOT** automatically represent a new performance checkpoint.
+  - **No Invented Fields / No Overloading:** `retention_notes` is strictly reserved for customer retention and repeat-user signals; it must **never** be used or overloaded to store restatement commentary. The immutable record's persistence timestamp (`recorded_at`) and identical `source_reference` provide the complete audit trail.
+
+### 6. Time and Date Semantics
+- `ExperimentMetrics.recorded_at`: Authoritative UTC timestamp of when VentureBot received and persisted that particular observation snapshot.
+  It does **NOT** mean:
+  - Start of the reporting window
+  - End of the reporting window
+  - Performance checkpoint date
+  - Evidence that a new business period began
+- `date_start` and `date_stop`: Calendar dates (`YYYY-MM-DD`) evaluated strictly in the Meta Ad Account's reporting timezone. They represent the delivery period, not the database ingestion time.
+
+### 7. Analysis Contract & Resolution Rule
+- When calculating sequential performance deltas, the Analysis layer MUST NOT blindly treat every `ExperimentMetrics` row as a separate performance checkpoint.
+- For a logical reporting window with multiple observations (`Observation A`, `Observation B (restatement)`, `Observation C (restatement)`):
+  - The Analysis layer must resolve the **CURRENT/LATEST observation** for that logical reporting window (by `recorded_at.desc()`) before using it as a performance checkpoint.
+  - Therefore: **`RESTATEMENT ≠ NEW PERFORMANCE PERIOD`**.
+- *Scope Note:* This analysis behavior is a locked requirement for future implementation; it is NOT implemented in Step 43.1.1.
+
+### 8. Financial Ledger & Governance Isolation Invariants
+- **Telemetry $\neq$ Financial Ledger:** Observational ad spend (`cost`) recorded from Meta Insights never touches `CapitalTransaction` or `liquid_capital`.
+- **Restatement Ledger Protection:** A restatement from ₹100 to ₹105 MUST NOT create a ₹5 `EXPERIMENT_SPEND` transaction. Restatements never mutate ledger balances, spend ceilings, or allocations.
+- **Zero Autonomous Decisions:** Neither raw telemetry nor restatements can trigger automated lifecycle decisions (`SCALE`, `ITERATE`, `KILL`, `HOLD`, `APPROVE`). All decisions remain explicitly human-authorized via `ExperimentDecisionService`.
+
+---
 *END OF VENTUREBOT ARCHITECTURE DOCUMENT*
+
