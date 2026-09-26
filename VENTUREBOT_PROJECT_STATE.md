@@ -2202,6 +2202,27 @@ Resolve the concrete blockers identified in Step 60:
   - All 5 syllabus sections present in `guide.html`.
   - Zero broken root-relative dependencies.
 
+#### 4. Live Controlled Deployment Verification (Over HTTP)
+- **Landing Page (`https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/`):**
+  - HTTP Status: `HTTP 200 OK`
+  - Response Size: `11,597 bytes`
+  - Canonical Tag: `https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/` (Verified)
+  - CTA Link: `<a class="btn-cta" id="cta-btn" href="guide.html">Get the Workflow Guide</a>` (Verified)
+  - Stale References: `venturebot.dev` = `False`, `pilot@venturebot.dev` = `False`
+- **Guide Page (`https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/guide.html`):**
+  - HTTP Status: `HTTP 200 OK`
+  - Response Size: `20,328 bytes`
+  - Canonical Tag: `https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/guide.html` (Verified)
+  - Return Link: `<a class="link-back" href="index.html">← Return to Landing Page Overview</a>` (Verified)
+  - Print / Save Action: `<button class="btn-action" onclick="window.print()">Print or Save as PDF</button>` (Verified)
+  - Syllabus Verification: All 5 sections verified live:
+    1. `Single-Source Invoice Log` (Verified)
+    2. `Predictable Follow-Up Cadence` (Verified)
+    3. `Receivables Visibility System` (Verified)
+    4. `Cash-Flow Buffer Organization` (Verified)
+    5. `15-Minute Weekly Financial Routine` (Verified)
+  - Stale References: `venturebot.dev` = `False`, `pilot@venturebot.dev` = `False`
+
 ### Invariants Maintained
 - **Experiment Status:** Strictly `DRAFT` (no mutation).
 - **Capital Allocation:** ₹0.00 (no capital allocated).
@@ -2216,9 +2237,14 @@ Resolve the concrete blockers identified in Step 60:
 - Full test suite: 472 passed (`python -m pytest`).
 - Type checking: Pyright 0 errors (`npx pyright`).
 - Static analysis: Pyrefly 0 errors (`uvx pyrefly check backend/ tests/`).
+- Commit: `97986d0` (`feat(pilot): complete static guide delivery path and remove dead-end references`).
+
+### Deviations / Uncertainties
+None. No backend, auth, database, payment, or external service dependencies were introduced. The pilot delivers the promised syllabus directly and statically over controlled GitHub Pages.
 
 ### Final Classification
-**PILOT COMPLETION PATH FIXED — LIVE VERIFICATION REQUIRED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+**PILOT COMPLETION PATH FIXED — LIVE VERIFICATION COMPLETED (PASS) — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 
 
