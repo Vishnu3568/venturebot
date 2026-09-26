@@ -55,32 +55,33 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.32 — Pilot Experience and Conversion-Path Audit (Step 60)
+V1.33 — Pilot CTA Completion Path and Controlled URL References (Step 61)
 
 ---
 
 ## Current Status
 
-Step 60 — Pilot Experience and Conversion-Path Audit Complete
+Step 61 — Pilot CTA Completion Path and Controlled URL References Fixed
 
-- **Pilot Experience & Conversion-Path Audit Findings:**
-  - Audited live controlled landing page (`https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/`) and repository files (`pilot/freelance-workflow/index.html`, `docs/pilot/freelance-workflow/index.html`).
-  - Repository files and live GitHub Pages deployment are 100% byte-for-byte identical (SHA256: `85642b8a4939c020f44605ee19f8036d72a1dae2c5c874dca62fccaf58785c7d`, 13,537 bytes).
-  - Headline, problem statement, guide syllabus, and audience segments render properly with inline CSS.
-  - **CTA Activation Behavior:** Activating the CTA button ("Get the Workflow Guide") executes inline JavaScript `handleCtaClick()`, which sets `pilot-modal` display to `block`.
-  - **Conversion Path Status:** The CTA does NOT deliver the guide, does NOT provide a download, does NOT collect email/leads, and does NOT navigate. It displays a static draft review notice directing inquiries to `pilot@venturebot.dev` (an external domain controlled by CarolinaBosch, not Vishnu3568).
-  - **Broken Links & Stale References:** Canonical link points to `venturebot.dev` (404); header/footer navigation links and stylesheet link are root-relative (`/register.html`, `/assets/style.css`), resolving to 404s on GitHub Pages.
-  - **Classification:** `CTA_COMPLETION_PATH_MISSING`
+- **Step 60 Blocker Resolved:**
+  - Resolved `CTA_COMPLETION_PATH_MISSING` blocker identified in Step 60 audit.
+  - Replaced dead modal and missing delivery with direct static delivery: `guide.html` created in both `pilot/freelance-workflow/` and `docs/pilot/freelance-workflow/`.
+  - Comprehensive 5-part guide content covers: Single-Source Invoice Log, Predictable Follow-Up Cadence (with 3-stage email templates), Receivables Visibility System, Cash-Flow Buffer Organization, and 15-Minute Weekly Financial Routine.
+  - CTA button ("Get the Workflow Guide") updated on `index.html` to link directly to `guide.html` (`href="guide.html"`). Zero dead-ends, zero email friction, zero accounts or logins needed.
+  - Eliminated all stale references to `venturebot.dev` and `pilot@venturebot.dev`.
+  - Canonical URLs corrected to point to verified controlled GitHub Pages URLs (`https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/` and `.../guide.html`).
+  - Removed broken root-relative links (`/register.html`, `/assets/style.css`, etc.) and replaced with self-contained pilot navigation (`Overview` and `Workflow Guide`).
+  - Added native print / save as PDF action (`window.print()`) for offline reference.
 - **Explicit Safety Boundaries Maintained:**
   - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
   - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 60)
+  - Capital Transactions: 0 (No transactions created by Step 61)
   - Capital Balance: ₹1,000.00 liquid, ₹1,000.00 available unallocated
   - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
   - Meta Spend: ₹0.00
   - SAFE_MODE: True (Enabled by default; unconditionally blocks deployment)
   - Live Execution: BLOCKED (Hard-blocked by Step 36 adapter guard and SAFE_MODE)
-- **Verification:** 471 tests passing, Pyright 0 errors, Pyrefly 0 errors. Zero application code changes. Capital remains ₹1,000.00 liquid, ₹0.00 spend.
+- **Verification:** 472 tests passing, Pyright 0 errors, Pyrefly 0 errors. Capital remains ₹1,000.00 liquid, ₹0.00 spend.
 
 
 
@@ -2152,5 +2153,72 @@ Performed a rigorous technical and user-experience audit of the live controlled 
 
 ### Final Classification
 **CTA_COMPLETION_PATH_MISSING**
+
+---
+
+## Step 61: Fix Pilot CTA Completion Path and Controlled URL References
+
+### Objective
+Resolve the concrete blockers identified in Step 60:
+1. Fix missing CTA completion path (`CTA_COMPLETION_PATH_MISSING`): Deliver the promised informational workflow guide directly to visitors without modal dead-ends, mailto dead-ends, account creation, logins, backends, databases, or third-party service dependencies.
+2. Correct controlled URL references: Eliminate all stale references to `venturebot.dev` and `pilot@venturebot.dev`, update canonical URLs to the verified controlled GitHub Pages deployment, and remove broken root-relative links.
+
+### Step 60 Blocker Recap
+- Step 60 established that clicking "Get the Workflow Guide" revealed an inline modal stating that distribution was in draft review and directed inquiries to `pilot@venturebot.dev` (an external domain controlled by CarolinaBosch).
+- The promised guide was not delivered, no downloads occurred, and canonical/navigational links pointed to external 404s.
+
+### Exact Changes Implemented
+
+#### 1. Static Guide Delivery Asset (`guide.html`)
+- Created `guide.html` in both `docs/pilot/freelance-workflow/` and `pilot/freelance-workflow/` (maintained 100% byte-for-byte identical).
+- Styled using the identical warm paper-and-ink inline CSS tokens (`--bg`, `--paper`, `--ink`, `--accent`, `--line`, etc.) ensuring self-contained rendering without external stylesheets.
+- Fully articulates the 5 syllabus sections promised on the landing page:
+  1. **Section 1: Single-Source Invoice Log:** Centralized 8-field tracking schema (`INV #`, `Client Name`, `Issue Date`, `Due Date`, `Terms`, `Amount`, `Status`, `Paid Date`) and 3 operational rules (Log before send, Conservative status update, Sequential numbering).
+  2. **Section 2: Predictable Follow-Up Cadence:** Scheduled 3-stage reminder cadence with ready-to-use professional email templates:
+     - Stage 1: Pre-due courtesy check (3 business days before due date).
+     - Stage 2: Day-after due date reminder (1 day past due).
+     - Stage 3: Escalated administrative check (7 days past due).
+  3. **Section 3: Receivables Visibility System:** Three deterministic aging categories (*Current*, *Aging*, *Critical*) and the *Work-Stoppage Principle* (pausing future milestone deliverables when prior work is 15+ days overdue).
+  4. **Section 4: Cash-Flow Buffer Organization:** Three-bucket capital separation rules: Tax & Compliance (25–30%), Operating Cushion (1–2 months baseline), and Owner Compensation (predictable draw).
+  5. **Section 5: The 15-Minute Weekly Financial Routine:** Step-by-step Friday checklist (0:00–3:00 Log New Deliverables, 3:00–7:00 Reconcile Inflows, 7:00–12:00 Send Follow-Ups, 12:00–15:00 Allocate Reserves).
+- **Print / Offline Action:** Integrated `window.print()` action ("Print or Save as PDF") and `@media print` CSS so visitors can save the guide locally.
+- **Honest Epistemic Standards:** Disclaims income/savings guarantees, fabricated testimonials, or commercial claims. Clearly identifies resource as early pilot material under Experiment `49fde874-9387-5056-934c-51a9cfca164f`.
+
+#### 2. Landing Page CTA & Link Corrections (`index.html`)
+- Replaced the modal activation button with a direct link to the guide:
+  `<a class="btn-cta" id="cta-btn" href="guide.html">Get the Workflow Guide</a>`
+- Removed `#pilot-modal` and its dead-end notice pointing to `pilot@venturebot.dev`.
+- Updated canonical link to: `https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/`.
+- Removed stale links to `/assets/style.css` and `/feed.xml`.
+- Replaced dead root-relative links (`/register.html`, `/audits.html`, etc.) in header and footer with valid local navigation (`Overview` and `Workflow Guide`).
+- Removed all occurrences of `venturebot.dev` and `pilot@venturebot.dev`.
+
+#### 3. Automated Integrity Verification (`tests/test_pilot_persistence.py`)
+- Added `test_step61_pilot_static_assets_integrity` verifying:
+  - Both repository copies (`pilot/` and `docs/`) exist and are identical for both `index.html` and `guide.html`.
+  - Zero occurrences of `venturebot.dev` and `pilot@venturebot.dev`.
+  - Proper canonical URL tags on both pages.
+  - Direct CTA linkage from `index.html` to `guide.html`.
+  - All 5 syllabus sections present in `guide.html`.
+  - Zero broken root-relative dependencies.
+
+### Invariants Maintained
+- **Experiment Status:** Strictly `DRAFT` (no mutation).
+- **Capital Allocation:** ₹0.00 (no capital allocated).
+- **Capital Transactions:** 0 (zero ledger rows created).
+- **Capital Balance:** Starting capital ₹1,000.00, liquid balance ₹1,000.00, available unallocated capital ₹1,000.00.
+- **Actual Spend:** ₹0.00.
+- **Meta Writes:** 0 (zero write requests, zero assets created).
+- **SAFE_MODE:** `True` (enforced).
+
+### Verification Evidence
+- Focused test: 6 passed (`pytest tests/test_pilot_persistence.py`).
+- Full test suite: 472 passed (`python -m pytest`).
+- Type checking: Pyright 0 errors (`npx pyright`).
+- Static analysis: Pyrefly 0 errors (`uvx pyrefly check backend/ tests/`).
+
+### Final Classification
+**PILOT COMPLETION PATH FIXED — LIVE VERIFICATION REQUIRED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 

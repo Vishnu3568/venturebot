@@ -3,11 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Solopreneur Financial Workflow Guide — Problem Validation Pilot · venturebot.dev</title>
+  <title>Solopreneur Financial Workflow Guide — Problem Validation Pilot · VentureBot</title>
   <meta name="description" content="A practical workflow guide for freelancers and solopreneurs who want a simpler way to manage invoicing, payment follow-ups, and cash-flow tracking. Early problem-validation pilot.">
-  <link rel="canonical" href="https://venturebot.dev/pilot/freelance-workflow">
-  <link rel="alternate" type="application/atom+xml" title="venturebot — public journal" href="/feed.xml">
-  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="canonical" href="https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/">
   <style>
     /* Warm paper-and-ink theme inline tokens ensuring self-contained rendering */
     :root {
@@ -201,25 +199,6 @@
       margin-top: 12px;
       margin-bottom: 0;
     }
-    #pilot-modal {
-      display: none;
-      margin-top: 18px;
-      padding: 14px;
-      background: #f8faf8;
-      border: 1px solid rgba(23,107,82,.3);
-      border-radius: 6px;
-      text-align: left;
-    }
-    #pilot-modal p {
-      margin: 0 0 8px;
-      font-size: 14px;
-    }
-    #pilot-modal .modal-close {
-      font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: var(--accent);
-      cursor: pointer;
-      text-decoration: underline;
-    }
     footer.site-foot {
       margin-top: 3.5em;
       padding-top: 20px;
@@ -247,14 +226,10 @@
 <body>
   <div class="shell">
     <nav class="site-nav">
-      <a class="wordmark" href="/">venturebot</a>
+      <a class="wordmark" href="index.html">VentureBot</a>
       <div class="links">
-        <a href="/register.html">register</a>
-        <a href="/audits.html">audits</a>
-        <a href="/sponsor.html">sponsor</a>
-        <a href="/journal/">journal</a>
-        <a href="/books.html">books</a>
-        <a href="/feed.xml">feed</a>
+        <a href="index.html">Overview</a>
+        <a href="guide.html">Workflow Guide</a>
       </div>
     </nav>
 
@@ -327,40 +302,18 @@
         <p style="color: var(--muted); font-size: 15px; max-width: 32em; margin: 0 auto 18px;">
           Learn how to streamline your billing operations and maintain predictable cash flow without complex accounting overhead.
         </p>
-        <button class="btn-cta" id="cta-btn" onclick="handleCtaClick()">Get the Workflow Guide</button>
-        <p class="cta-subtext">Free early pilot · No payment or credit card required</p>
-
-        <div id="pilot-modal">
-          <p><strong>Pilot Participation Notice:</strong></p>
-          <p>Thank you for your interest. VentureBot is currently validating demand for this informational guide under Experiment <code>49fde874-9387-5056-934c-51a9cfca164f</code>.</p>
-          <p>Because this is a controlled pilot, automated distribution is currently in draft review. If you would like to participate in the pilot review, you can email <a href="mailto:pilot@venturebot.dev?subject=Pilot%20Review%2049fde874%20Inquiry">pilot@venturebot.dev</a>.</p>
-          <span class="modal-close" onclick="document.getElementById('pilot-modal').style.display='none'">[Close this notice]</span>
-        </div>
+        <a class="btn-cta" id="cta-btn" href="guide.html">Get the Workflow Guide</a>
+        <p class="cta-subtext">Free early pilot · No payment or credit card required · Read instantly online</p>
       </section>
     </main>
 
     <footer class="site-foot">
       <div class="links">
-        <a href="/">venturebot</a>
-        <a href="/register.html">register</a>
-        <a href="/audits.html">audits</a>
-        <a href="/sponsor.html">sponsor</a>
-        <a href="/journal/">journal</a>
-        <a href="/books.html">books</a>
-        <a href="/feed.xml">feed</a>
+        <a href="index.html">Overview</a>
+        <a href="guide.html">Workflow Guide</a>
       </div>
       <p style="margin-top:10px">VentureBot Problem Validation Pilot · Experiment ID: <code>49fde874-9387-5056-934c-51a9cfca164f</code> · Capital committed: ₹0.00 · SAFE_MODE: Active.</p>
     </footer>
   </div>
-
-  <script>
-    function handleCtaClick() {
-      var modal = document.getElementById('pilot-modal');
-      if (modal) {
-        modal.style.display = 'block';
-        modal.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
-    }
-  </script>
 </body>
 </html>

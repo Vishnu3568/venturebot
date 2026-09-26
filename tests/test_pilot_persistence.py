@@ -14,6 +14,7 @@ Verifies:
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -319,3 +320,78 @@ def test_step59_destination_url_update_idempotency(test_session: Session) -> Non
     assert exp3.id == PILOT_EXPERIMENT_ID
     assert exp3.destination_url == VERIFIED_CONTROLLED_DESTINATION_URL
     assert len(exp_repo.list(opportunity_id=opp3.id)) == 1
+
+
+def test_step61_pilot_static_assets_integrity() -> None:
+    """Verify Step 61: pilot landing page and static guide asset integrity.
+
+    Verifies:
+    1. Both pilot/ and docs/ copies of index.html exist and are identical.
+    2. Both pilot/ and docs/ copies of guide.html exist and are identical.
+    3. Zero occurrences of 'venturebot.dev' in either HTML file.
+    4. Zero occurrences of 'pilot@venturebot.dev' in either HTML file.
+    5. Canonical link in index.html points to verified controlled URL.
+    6. Canonical link in guide.html points to verified controlled guide URL.
+    7. CTA in index.html links directly to guide.html (no modal dead-end).
+    8. guide.html contains all 5 required syllabus sections.
+    9. Zero broken root-relative links (/register.html, /assets/style.css, etc.).
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    pilot_index = repo_root / "pilot" / "freelance-workflow" / "index.html"
+    docs_index = repo_root / "docs" / "pilot" / "freelance-workflow" / "index.html"
+    pilot_guide = repo_root / "pilot" / "freelance-workflow" / "guide.html"
+    docs_guide = repo_root / "docs" / "pilot" / "freelance-workflow" / "guide.html"
+
+    # 1. Existence and synchronization
+    assert pilot_index.is_file(), "pilot/freelance-workflow/index.html missing"
+    assert docs_index.is_file(), "docs/pilot/freelance-workflow/index.html missing"
+    assert pilot_guide.is_file(), "pilot/freelance-workflow/guide.html missing"
+    assert docs_guide.is_file(), "docs/pilot/freelance-workflow/guide.html missing"
+
+    index_content = pilot_index.read_text(encoding="utf-8")
+    docs_index_content = docs_index.read_text(encoding="utf-8")
+    guide_content = pilot_guide.read_text(encoding="utf-8")
+    docs_guide_content = docs_guide.read_text(encoding="utf-8")
+
+    assert index_content == docs_index_content, "pilot and docs index.html must be identical"
+    assert guide_content == docs_guide_content, "pilot and docs guide.html must be identical"
+
+    # 2. Zero references to venturebot.dev or external mailto
+    assert "venturebot.dev" not in index_content.lower(), "index.html must not contain venturebot.dev references"
+    assert "venturebot.dev" not in guide_content.lower(), "guide.html must not contain venturebot.dev references"
+    assert "pilot@venturebot.dev" not in index_content, "index.html must not route to pilot@venturebot.dev"
+    assert "pilot@venturebot.dev" not in guide_content, "guide.html must not route to pilot@venturebot.dev"
+
+    # 3. Canonical URLs
+    assert '<link rel="canonical" href="https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/">' in index_content
+    assert '<link rel="canonical" href="https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/guide.html">' in guide_content
+
+    # 4. CTA completion path (links directly to guide.html)
+    assert 'href="guide.html"' in index_content, "CTA on index.html must link directly to guide.html"
+    assert 'Get the Workflow Guide' in index_content
+
+    # 5. All 5 guide syllabus sections present in guide.html
+    syllabus_sections = [
+        "Single-Source Invoice Log",
+        "Predictable Follow-Up Cadence",
+        "Receivables Visibility System",
+        "Cash-Flow Buffer Organization",
+        "15-Minute Weekly Financial Routine",
+    ]
+    for section in syllabus_sections:
+        assert section in guide_content, f"guide.html missing syllabus section: '{section}'"
+
+    # 6. No broken root-relative dependencies
+    broken_patterns = [
+        'href="/register.html"',
+        'href="/audits.html"',
+        'href="/sponsor.html"',
+        'href="/journal/"',
+        'href="/books.html"',
+        'href="/feed.xml"',
+        'href="/assets/style.css"',
+    ]
+    for broken in broken_patterns:
+        assert broken not in index_content, f"index.html contains broken link: {broken}"
+        assert broken not in guide_content, f"guide.html contains broken link: {broken}"
+
