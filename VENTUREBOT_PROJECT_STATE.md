@@ -55,27 +55,29 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.35 — Controlled Pilot Measurement Capability Design Inspection (Step 63)
+V1.36 — Pilot Experiment Definition / Evidence Compatibility Audit (Step 64)
 
 ---
 
 ## Current Status
 
-Step 63 — Controlled Pilot Measurement Capability Design Inspection Complete
+Step 64 — Pilot Experiment Definition / Evidence Compatibility Audit Complete
 
-- **Step 63 Design Inspection Findings:**
-  - Evaluated existing capabilities: backend is local Python library/CLI with zero public HTTP listeners; GitHub Pages CDN provides zero access logs or visitor streaming to VentureBot.
-  - Defined candidate minimum observable events distinguishing ad arrival from intentional guide engagement:
-    * Event A: CTA Activation / Guide Page Access (intention to read the guide).
-    * Event B: Guide PDF Download / Print Action (intention to save/retain the guide).
-  - Documented five architectural options neutrally (Serverless Edge Webhook, GitHub Repo Dispatch/Webhook, Static Pre-Signed Storage Asset/PDF Fetch with Access Logging, Static Redirect Gateway, or Re-scoping Strictly to Ad-Level Telemetry).
-  - Established rigorous Evidence Contract requiring verifiable timestamps, canonical `source_reference`, zero metric fabrication, and strict data minimization (zero PII, zero cookies, zero fingerprinting).
-  - Enforced strict decision boundary: no winner selected, no scoring formulas applied. Implementation deferred to human review.
+- **Step 64 Audit Findings:**
+  - Audited persisted Experiment `49fde874-9387-5056-934c-51a9cfca164f` derived from Opportunity `63667b67-8482-519c-a498-251047e4b3ec`.
+  - Constructed comprehensive 14-item Evidence Compatibility Matrix:
+    * Fully Compatible: Ad impressions, Ad link clicks, Ad spend/cost (authoritative Meta Graph API Insights).
+    * Partially Compatible: CPC, CPM, CTR (available in transient Meta payload, derivable, but not stored in `ExperimentMetrics` table schema); Revenue/Profit/ROI/ROAS (unmonetized pilot; correctly evaluated as `None`).
+    * Not Currently Observable: Landing page visits, Guide page accesses, Guide reading engagement, Conversions.
+    * Undefined: Human operational success and failure thresholds (currently marked "NOT YET DEFINED — REQUIRES HUMAN APPROVAL").
+  - Evaluated Hypothesis Testability: Current telemetry tests whether ad creative generates link clicks on Meta, but cannot test whether users access, read, or derive value from the workflow guide on GitHub Pages.
+  - Confirmed Architecture & Reporting Compatibility: Ingestion of Meta-only observations adheres strictly to Section 24 and the invariant `RESTATEMENT != NEW PERFORMANCE PERIOD`.
+  - Identified Unresolved Evidence Boundary: Before approving the experiment, the human operator must explicitly decide whether to proceed with an Ad-Only Link-Click Demand Pilot or defer execution until on-site telemetry is implemented, and must supply concrete numerical success/failure thresholds.
 - **Explicit Safety Boundaries Maintained:**
   - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
   - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 63)
-  - Capital Balance: ₹1,000.00 liquid, ₹1,000.00 available unallocated
+  - Capital Transactions: 0 (No transactions created by Step 64)
+  - Capital Balance: Starting capital ₹1,000.00, liquid ₹1,000.00, available unallocated ₹1,000.00
   - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
   - Meta Spend: ₹0.00
   - SAFE_MODE: True (Enabled by default; unconditionally blocks deployment)
@@ -2416,6 +2418,140 @@ To distinguish external ad click / arrival from actual on-site guide access or i
 
 ### Final Classification
 **CONTROLLED PILOT MEASUREMENT DESIGN INSPECTION COMPLETE — NO IMPLEMENTATION PERFORMED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 64 — Pilot Experiment Definition / Evidence Compatibility Audit
+
+### 1. Persisted Pilot Experiment Record Retrieved
+- **Experiment ID:** `49fde874-9387-5056-934c-51a9cfca164f`
+- **Opportunity ID:** `63667b67-8482-519c-a498-251047e4b3ec`
+- **Title:** Inherited from linked Opportunity: `"Solopreneur Financial Workflow Guide — Problem Validation Pilot"` (The `Experiment` / `ExperimentORM` domain model does not declare a `title` column).
+- **Hypothesis:** `"Presenting a targeted informational workflow guide to Indian solopreneurs and freelancers via Meta platforms will generate link clicks to a problem-validation landing page."`
+- **Channel:** `Channel.FACEBOOK` (`"facebook"`)
+- **Audience:** Inherited from linked Opportunity / Meta Execution Specification (`target_country_codes = ["IN"]`, `age_min = 21`, `age_max = 55`, `interests = [...]`). `Experiment` domain model does not define an `audience` column.
+- **Objective:** `"Problem validation pilot measuring link click engagement for solopreneur financial workflow guide on Meta Ads."`
+- **Monetization Method:** `MonetizationMethod.DIRECT_SALE` (`"direct_sale"`)
+- **CTA:** Defined in Meta Execution Specification as `LEARN_MORE`; on-site landing page CTA text is `"Get the Workflow Guide"`. `Experiment` domain model does not define a `cta` column.
+- **Landing Page / Destination URL:** `https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/`
+- **Proposed Budget Ceiling:** `₹200.00` (stored in `allocated_budget` field as candidate ceiling; not yet allocated in ledger).
+- **Max Allowed Spend:** `₹200.00` (`max_allowed_spend` hard ceiling).
+- **Actual Spend:** `₹0.00` (`actual_spend` in experiment and ledger).
+- **Duration:** Timeline fields (`planned_start`, `planned_end`, `actual_start`, `actual_end`) are `None`; operational proposal is 72 hours.
+- **Success Criteria:** `"Observable telemetry: total spend <= ₹200.00, successful delivery and link clicks recorded. Human success threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+- **Failure Criteria:** `"Observable telemetry: zero delivery, policy rejection, or account billing error. Human failure threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+- **Measurement Metrics:** Stored in `ExperimentMetrics`: `impressions`, `clicks`, `visitors` (`None`), `conversions` (`None`), `conversion_rate` (`None`), `cost`, `revenue` (`None`), `profit_loss` (`None`), `roas` (`None`), `roi` (`None`), `retention_notes` (`""`). Ad metrics `cpc`, `cpm`, `ctr` available via transient Meta Insights response.
+- **Expected Outcome:** Defined in `objective`: `"Problem validation pilot measuring link click engagement for solopreneur financial workflow guide on Meta Ads."`
+- **Evidence Requirements:** Governed by Architecture Sections 17 & 24 (`EvidenceCategory.FACT`, canonical `source_reference`, verified Meta Graph API Insights).
+- **Current Status:** `ExperimentStatus.DRAFT` (`"draft"`).
+
+### 2. Source Opportunity Retrieved
+- **Opportunity ID:** `63667b67-8482-519c-a498-251047e4b3ec`
+- **Title:** `"Solopreneur Financial Workflow Guide — Problem Validation Pilot"`
+- **Description / Problem Statement:** `"A problem-validation opportunity to test whether a targeted informational workflow guide addressing invoicing and cash-flow friction generates measurable interest among Indian independent workers."`
+- **Category:** `OpportunityCategory.PRODUCT` (`"product"`)
+- **Status:** `OpportunityStatus.DISCOVERED` (`"discovered"`)
+- **Source:** `"Step 51.1 Pilot Review"`
+- **Evidence Notes:**
+  `"[HYPOTHESIS] Presenting a targeted informational workflow guide to Indian solopreneurs and freelancers via Meta platforms will generate link clicks to a problem-validation landing page.\n[FACT] Authoritative starting capital is ₹1,000.00; Meta ad account act_1985595022114520 is active in INR; Facebook Page 1389949167526709 access verified.\n[INFERENCE] A ₹200.00 proposed budget tests click interest without risking the ₹800.00 capital reserve."`
+- **Audience:** `"Independent freelancers, solopreneurs, and agency operators in India"`
+- **Monetization Notes:** `"Problem validation pilot prior to monetization funnel development; revenue currently UNKNOWN/UNMEASURED."`
+- **Estimated Revenue / Cost:** Min ₹0.00, Max ₹0.00; Confidence: 0.0.
+- **What the Experiment is Actually Validating:**
+  The Opportunity aims to test whether an *informational workflow guide addressing invoicing/cash-flow friction* generates measurable interest. The experiment tests this *exclusively via Meta ad link clicks*. There is a structural semantic gap between clicking an ad and consuming/valuing the guide.
+
+### 3. Evidence Compatibility Matrix
+
+| Experiment Claim / Intended Observation | Available Authoritative Source | Can Currently Be Recorded as FACT? | If Not, Why? / Classification |
+|---|---|---|---|
+| **1. Ad impressions** | Meta Graph API Insights (`MetaInsightsTelemetry.impressions`) | YES | Recorded as `EvidenceCategory.FACT` in `ExperimentMetrics.impressions` via `MetaTelemetryIngestionService`. (`COMPATIBLE`) |
+| **2. Ad link clicks** | Meta Graph API Insights (`MetaInsightsTelemetry.clicks`) | YES | Recorded as `EvidenceCategory.FACT` in `ExperimentMetrics.clicks` via `MetaTelemetryIngestionService`. (`COMPATIBLE`) |
+| **3. Landing-page visits** | None | NO | GitHub Pages provides zero access logs/visitor streaming to VentureBot; `ExperimentMetrics.visitors` is left `None`. (`NOT CURRENTLY OBSERVABLE`) |
+| **4. Guide accesses** | None | NO | VentureBot has no server/edge listener observing HTTP requests for `guide.html`. (`NOT CURRENTLY OBSERVABLE`) |
+| **5. Guide engagement** (reading/scrolling) | None | NO | No client-side telemetry or event logging mechanism exists. (`NOT CURRENTLY OBSERVABLE`) |
+| **6. Conversions** | None | NO | No registration, download, checkout, or lead capture exists; `ExperimentMetrics.conversions` is left `None`. (`NOT CURRENTLY OBSERVABLE`) |
+| **7. Revenue** | Financial Ledger / Payment Provider | PARTIALLY / TRIVIALLY | Evaluates to `None` in `ExperimentMetrics.revenue`; pilot is explicitly non-monetized problem validation. (`COMPATIBLE` as `None` / `REQUIRES EXTERNAL EVIDENCE` if revenue claimed) |
+| **8. Cost / spend** | Meta Graph API Insights (`MetaInsightsTelemetry.spend`) | YES | Recorded as `EvidenceCategory.FACT` in `ExperimentMetrics.cost` via `MetaTelemetryIngestionService`. (`COMPATIBLE`) |
+| **9. CPC (Cost Per Click)** | Meta Graph API Insights (`MetaInsightsTelemetry.cpc`) | PARTIALLY COMPATIBLE | Delivered in transient Meta API payload; derivable as `cost / clicks`, but NOT stored as schema column in `ExperimentMetrics`. (`PARTIALLY COMPATIBLE`) |
+| **10. CTR (Click-Through Rate)** | Meta Graph API Insights (`MetaInsightsTelemetry.ctr`) | PARTIALLY COMPATIBLE | Delivered in transient Meta API payload; derivable as `clicks / impressions`, but NOT stored as schema column in `ExperimentMetrics`. (`PARTIALLY COMPATIBLE`) |
+| **11. CPM (Cost Per 1k Impressions)** | Meta Graph API Insights (`MetaInsightsTelemetry.cpm`) | PARTIALLY COMPATIBLE | Delivered in transient Meta API payload; derivable as `(cost / impressions) * 1000`, but NOT stored as schema column in `ExperimentMetrics`. (`PARTIALLY COMPATIBLE`) |
+| **12. ROI** | `ExperimentMeasurementService` computation | NO (Evaluates to `None`) | Non-monetized validation pilot (`revenue = None`), so `profit_loss = None` and `roi = None`. Not a raw FACT observation. (`COMPATIBLE` as `None`) |
+| **13. ROAS** | `ExperimentMeasurementService` computation | NO (Evaluates to `None`) | Non-monetized validation pilot (`revenue = None`), so `roas = None`. Not a raw FACT observation. (`COMPATIBLE` as `None`) |
+| **14. Profit/loss** | `ExperimentMeasurementService` computation | NO (Evaluates to `None`) | When `revenue` is `None`, `profit_loss` is set to `None` per line 56 of `service.py`. (`COMPATIBLE` as `None`) |
+
+### 4. Hypothesis Testability
+1. **Portion Testable Today:**
+   The Meta advertising link-click hypothesis: whether presenting the ad creative to Indian freelancers/solopreneurs generates ad impressions, link clicks, and at what cost (spend, CPC, CPM, CTR).
+2. **Portion Untestable Today:**
+   The workflow guide resonance hypothesis: whether users who click actually read, navigate to, or derive value from `guide.html` on GitHub Pages.
+3. **Unsupported Statements if Run Today:**
+   Any claim regarding bounce rate, time-on-page, syllabus section readership, guide completion, or qualitative problem validation beyond ad click-through.
+4. **Ad Interest vs. Guide Engagement Distinction:**
+   The current experiment definition's hypothesis narrowly mentions "generate link clicks to a problem-validation landing page", which is strictly ad interest. However, the source Opportunity seeks to validate interest in the "informational workflow guide". The current telemetry CANNOT observe guide engagement or distinguish curiosity ad clicks from true guide consumption.
+5. **Metrics That Cannot Be Populated Authoritatively:**
+   `visitors`, `conversions`, `conversion_rate`, `revenue`, `profit_loss`, `roas`, and `roi` cannot be populated from external authoritative telemetry and remain `None`. Furthermore, the human decision thresholds in `success_criteria` and `failure_criteria` are currently placeholder strings (`"NOT YET DEFINED — REQUIRES HUMAN APPROVAL"`).
+
+### 5. Success / Failure Criteria Audit
+- **Success Criteria:** `"Observable telemetry: total spend <= ₹200.00, successful delivery and link clicks recorded. Human success threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+  * Needed Observations: `spend <= 200.00`, `impressions > 0`, `clicks > 0`, plus numerical performance benchmarks (e.g. target CTR, target CPC).
+  * Current Availability: Telemetry observations are available via Meta Insights. Numerical performance benchmarks are `UNDEFINED`.
+  * Source: Meta Graph API Insights.
+  * Can it produce a FACT? Telemetry values are FACT. However, whether they constitute "success" is an ungrounded inference because no target threshold exists.
+  * Dependent on unavailable on-site metrics? No. The criterion text relies strictly on ad telemetry.
+- **Failure Criteria:** `"Observable telemetry: zero delivery, policy rejection, or account billing error. Human failure threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+  * Needed Observations: `impressions == 0`, Meta policy rejection status, Meta billing error, or performance failure thresholds (e.g. max CPC exceeded).
+  * Current Availability: Technical failures are observable via Meta API adapter / error handling. Performance failure thresholds are `UNDEFINED`.
+  * Source: Meta Graph API.
+  * Can it produce a FACT? Yes for technical failure events. Performance failure is undefined.
+  * Dependent on unavailable on-site metrics? No.
+
+### 6. Financial Evidence Audit
+- **Proposed Budget:** ₹200.00 (`Experiment.allocated_budget`). Authoritative source: Experiment definition.
+- **Max Spend Ceiling:** ₹200.00 (`Experiment.max_allowed_spend`). Authoritative source: Experiment definition and Step 36 adapter guard.
+- **Actual Spend:** ₹0.00.
+  * Authoritative source 1 (Ledger): `CapitalRepository` SQLite ledger (currently ₹0.00; no transactions created).
+  * Authoritative source 2 (Observational): Meta Graph API Insights (`MetaInsightsTelemetry.spend` / `ExperimentMetrics.cost`).
+- **Revenue / Profit-Loss / ROI / ROAS:**
+  * Authoritative source: NONE. All evaluate to `None` in `ExperimentMetrics`.
+  * The experiment is non-monetized; zero revenue is expected or observable.
+
+### 7. Decision / Reporting Compatibility
+- **Architecture Section 24 Conformance:** Meta Insights telemetry ingestion via `MetaTelemetryIngestionService` creates immutable `ExperimentMetrics` rows classified strictly as `EvidenceCategory.FACT` with canonical identity `meta:insights:campaign:<campaign_id>:<date_start>:<date_stop>`.
+- **Duplicate & Restatement Logic:**
+  * Exact duplicate snapshot $\to$ `DUPLICATE_NO_OP`.
+  * Revised upstream Meta metrics $\to$ `RESTATEMENT_APPENDED` (new immutable row, identical `source_reference`, updated `recorded_at`).
+- **Core Invariant Verified:** `RESTATEMENT != NEW PERFORMANCE PERIOD`. A restatement updates historical window accuracy; it does NOT advance business progression, mutate the capital ledger, or trigger automated lifecycle decisions.
+- **Decision Isolation:** `ExperimentDecisionService` requires explicit human-authorized recording of decisions (`APPROVE`, `HOLD`, `SCALE`, `ITERATE`, `KILL`). Zero automated decisions exist.
+- **Conclusion:** Meta-only telemetry ingestion is fully compatible with existing measurement, reporting-window, and decision contracts.
+
+### 8. What the Experiment Can Empirically Establish Today
+1. Ad creative presentation resonance (impressions, CPM) within the targeted Indian freelancer/solopreneur demographic.
+2. Initial headline/hook click interest (link clicks, CPC, CTR).
+3. Exact advertising cost disbursed to Meta for that click interest (spend).
+4. Meta delivery reliability and policy compliance.
+
+### 9. What the Experiment Cannot Establish Today
+1. Whether any human who clicked actually arrived on `index.html` (landing page visits / bounce rate).
+2. Whether anyone clicked the on-site CTA ("Get the Workflow Guide") or loaded `guide.html`.
+3. Whether anyone read, scrolled, printed, or saved the static guide.
+4. Whether the problem statement (invoicing/cash-flow friction) resonated with actual users.
+5. Any conversion rate, revenue, profit, ROI, or commercial viability metric.
+
+### 10. Unresolved Evidence Boundary
+Before the experiment can be considered for approval, the following boundary must be resolved by human direction:
+1. **Scope Boundary:** Must decide whether to run the pilot as an **Ad-Level Link-Click Demand Test Only** (accepting that on-site engagement is unobserved), or pause until an on-site measurement capability (e.g. Option 1 or 3 from Step 63) is implemented.
+2. **Threshold Boundary:** Concrete numerical thresholds for success and failure (e.g. target CPC $\le$ ₹X, target CTR $\ge$ Y%, minimum clicks $\ge$ Z) must be explicitly defined to replace `"NOT YET DEFINED — REQUIRES HUMAN APPROVAL"`.
+
+### 11. Safety Invariants & Final Classification
+- **Capital State:** Starting capital ₹1,000.00, liquid ₹1,000.00, allocated ₹0.00, actual spend ₹0.00, capital transactions = 0.
+- **Meta Writes:** 0 live write requests; 0 external executions created.
+- **SAFE_MODE:** `True` (enforced).
+- **Experiment Status:** Strictly `DRAFT` (no mutation).
+- **Application Code Changes:** 0.
+
+### Final Classification
+**PILOT DEFINITION AUDITED — EVIDENCE GAP IDENTIFIED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 
 
