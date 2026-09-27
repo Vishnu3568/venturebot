@@ -55,26 +55,26 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.37 — Pilot Measurement Scope Decision Preparation (Step 65)
+V1.38 — Human Measurement Scope Decision Recorded (Step 66)
 
 ---
 
 ## Current Status
 
-Step 65 — Pilot Measurement Scope Decision Preparation Complete
+Step 66 — Human Measurement Scope Decision Recorded Complete
 
-- **Step 65 Decision-Preparation Findings:**
-  - Prepared factual, read-only decision surface for the human operator across the two scope paths identified in Step 63 and Step 64.
-  - Re-verified experiment purpose and persistent entities: Experiment `49fde874-9387-5056-934c-51a9cfca164f` (DRAFT) and Opportunity `63667b67-8482-519c-a498-251047e4b3ec` (DISCOVERED).
-  - Documented Path A (Ad-Level Link-Click Demand Test Only): Measures top-of-funnel link click interest via Meta Insights; leaves on-site reading and guide consumption unobserved.
-  - Documented Path B (On-Site Measurement Required Before Pilot Approval): Details factual characteristics of the four Step 63 technical options (Serverless Edge Webhook, GitHub Repo Dispatch, Storage Asset Fetch with Access Logging, Redirect Gateway) without ranking or selecting an option.
-  - Built 9-dimension neutral comparison table and 8-claim evidence boundary table using canonical architecture classifications.
-  - Documented threshold boundary: Success and failure thresholds remain explicitly undefined (`"NOT YET DEFINED — REQUIRES HUMAN APPROVAL"`), requiring human operator benchmark determination.
-  - Formulated the exact Human Decision Required (Decision 1: Scope limitation vs. prerequisite on-site telemetry; Decision 2: Numerical success/failure thresholds) without recommending or selecting an answer.
+- **Step 66 Project-Control Findings:**
+  - Recorded explicit human operator decision: **PATH B — ON-SITE MEASUREMENT REQUIRED BEFORE PILOT EXECUTION**.
+  - Rationale: The pilot must establish at least one trustworthy on-site empirical signal in addition to Meta ad-level telemetry before capital is deployed.
+  - Initial Measurement Boundary Established: Target first controlled on-site signal is `GUIDE_ACCESS` (a verified request/access event for the controlled guide resource).
+  - Strict Epistemic Demarcation Locked: `GUIDE_ACCESS` confirms asset request/delivery only; it is NOT proof of reading, comprehension, perceived value, problem validation, conversion, or revenue generation.
+  - Measurement Privacy & Architectural Guardrails Enforced: Zero PII collection, zero IP persistence, zero fingerprinting, zero unnecessary cookies, zero client-side tracking, zero third-party analytics, zero unnecessary tracking infrastructure. Must produce an auditable `FACT` mapped to the canonical evidence and reporting-window model.
+  - Concrete Implementation Deferred: Path B scope requirement is recorded; choice among candidate technical architectures (from Step 63) remains an uncommitted engineering decision for the next step.
+  - Success/Failure Thresholds: Numerical thresholds remain explicitly unresolved/undefined (`"NOT YET DEFINED — REQUIRES HUMAN APPROVAL"`), awaiting operator definition.
 - **Explicit Safety Boundaries Maintained:**
   - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
   - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 65)
+  - Capital Transactions: 0 (No transactions created by Step 66)
   - Capital Balance: Starting capital ₹1,000.00, liquid ₹1,000.00, available unallocated ₹1,000.00
   - Actual Spend: ₹0.00
   - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
@@ -2699,6 +2699,79 @@ What success/failure criteria should be explicitly defined for the selected scop
 
 ### Final Classification
 **PILOT MEASUREMENT SCOPE DECISION PREPARED — NO HUMAN DECISION MADE — NO IMPLEMENTATION — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 66 — Human Measurement Scope Decision Record
+
+### 1. Project Control Context & Inputs
+- **Authoritative Control Documents:** `VENTUREBOT_ARCHITECTURE.md` and `VENTUREBOT_PROJECT_STATE.md`.
+- **Preceding Findings:**
+  * Step 63 established that GitHub Pages provides zero VentureBot-accessible visitor access logs and documented four candidate on-site measurement architectures (plus retaining ad-only telemetry).
+  * Step 64 established the evidence compatibility gap between top-of-funnel Meta link clicks and on-site guide engagement.
+  * Step 65 prepared the factual decision surface between Path A (Ad-Level Link-Click Demand Test Only) and Path B (On-Site Measurement Required Before Pilot Execution).
+
+### 2. Human Decision Recorded: Path B
+The human operator has explicitly reviewed the decision surface and made the following formal selection:
+
+> **SELECTED SCOPE:** `PATH B — ON-SITE MEASUREMENT REQUIRED BEFORE PILOT EXECUTION`
+
+### 3. Rationale for Selection
+The pilot must establish at least one trustworthy on-site empirical signal in addition to Meta ad-level telemetry before real capital is deployed. Measuring only top-of-funnel ad clicks leaves the true objective of the Opportunity—validating whether independent workers engage with the workflow guide—completely unobserved.
+
+### 4. Initial Measurement Boundary: `GUIDE_ACCESS`
+The target first controlled on-site observable signal is:
+
+> **TARGET SIGNAL:** `GUIDE_ACCESS`  
+> **INTERPRETATION:** A verified request/access event for the controlled guide resource (`guide.html` or equivalent guide asset).
+
+#### Strict Epistemic Demarcation (Non-Equivalences):
+A recorded `GUIDE_ACCESS` event confirms that a network request for the guide was received and served. It **MUST NOT** be interpreted as proof that:
+1. A human actually read the guide.
+2. The guide was understood.
+3. The guide was valuable or useful.
+4. The underlying cash-flow friction problem was validated.
+5. A user conversion occurred.
+6. Revenue was generated.
+
+These remain separate, unvalidated empirical questions requiring distinct subsequent evidence.
+
+### 5. Measurement Privacy & Architectural Guardrails
+Any future implementation of the on-site measurement capability must strictly adhere to VentureBot's architectural constraints:
+- **Zero PII Collection:** No names, email addresses, phone numbers, or user identifiers.
+- **Zero IP Persistence:** Client IP addresses must never be stored in the VentureBot SQLite database or long-term storage.
+- **Zero Fingerprinting:** No canvas, audio, hardware, or font fingerprinting.
+- **Zero Unnecessary Cookies:** No tracking cookies, session identifiers, or advertising pixels.
+- **Zero Third-Party Analytics:** No Google Analytics, Meta Pixel, Hotjar, or external surveillance trackers injected into the static pages.
+- **Minimal Infrastructure:** Must produce an immutable, auditable `EvidenceCategory.FACT` record with a canonical `source_reference` conformant with Architecture Section 17 & 24.
+
+### 6. Deferral of Concrete Implementation Approach
+Step 65 documented multiple candidate technical mechanisms (Option 1: Serverless Edge Webhook, Option 2: GitHub Action Dispatch, Option 3: Pre-Signed Storage URL Asset Fetch with Access Logging, Option 4: Static Hosted Redirection Gateway).
+- **Current Status:** The human decision selects Path B as a project-level requirement.
+- **Next-Step Engineering Decision:** The choice of which specific technical architecture to implement is deliberately deferred to the next engineering design/implementation step. No technology is selected or implemented in Step 66.
+
+### 7. Status of Success / Failure Thresholds
+- **Current State:** Success and failure criteria in the persisted experiment record (`49fde874-9387-5056-934c-51a9cfca164f`) remain:
+  * `"Observable telemetry: total spend <= ₹200.00, successful delivery and link clicks recorded. Human success threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+  * `"Observable telemetry: zero delivery, policy rejection, or account billing error. Human failure threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+- **Threshold Invariant:** No replacement numerical thresholds (target CPC, target CTR, minimum clicks, or guide access counts) were invented or assigned in this step. They remain explicitly undefined until determined in a subsequent step.
+
+### 8. Financial State & Execution Safety Invariants
+- **Starting Capital:** ₹1,000.00
+- **Current Liquid Balance:** ₹1,000.00
+- **Active Allocations:** ₹0.00
+- **Available Unallocated Capital:** ₹1,000.00
+- **Actual Spend:** ₹0.00
+- **Meta Spend:** ₹0.00
+- **Capital Transactions:** 0
+- **Meta Writes:** 0 (zero campaigns, ad sets, creatives, or ads created)
+- **SAFE_MODE:** `True` (enforced)
+- **Experiment Status:** Strictly `DRAFT` (no approval granted, no status mutation)
+- **Application Code Changes:** 0
+
+### Final Classification
+**HUMAN MEASUREMENT SCOPE DECISION RECORDED — PATH B SELECTED — IMPLEMENTATION DEFERRED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 
 
