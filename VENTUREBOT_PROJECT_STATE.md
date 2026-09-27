@@ -55,26 +55,27 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.38 — Human Measurement Scope Decision Recorded (Step 66)
+V1.39 — Guide Access Implementation Feasibility Inspection (Step 67)
 
 ---
 
 ## Current Status
 
-Step 66 — Human Measurement Scope Decision Recorded Complete
+Step 67 — Guide Access Implementation Feasibility Inspection Complete
 
-- **Step 66 Project-Control Findings:**
-  - Recorded explicit human operator decision: **PATH B — ON-SITE MEASUREMENT REQUIRED BEFORE PILOT EXECUTION**.
-  - Rationale: The pilot must establish at least one trustworthy on-site empirical signal in addition to Meta ad-level telemetry before capital is deployed.
-  - Initial Measurement Boundary Established: Target first controlled on-site signal is `GUIDE_ACCESS` (a verified request/access event for the controlled guide resource).
-  - Strict Epistemic Demarcation Locked: `GUIDE_ACCESS` confirms asset request/delivery only; it is NOT proof of reading, comprehension, perceived value, problem validation, conversion, or revenue generation.
-  - Measurement Privacy & Architectural Guardrails Enforced: Zero PII collection, zero IP persistence, zero fingerprinting, zero unnecessary cookies, zero client-side tracking, zero third-party analytics, zero unnecessary tracking infrastructure. Must produce an auditable `FACT` mapped to the canonical evidence and reporting-window model.
-  - Concrete Implementation Deferred: Path B scope requirement is recorded; choice among candidate technical architectures (from Step 63) remains an uncommitted engineering decision for the next step.
-  - Success/Failure Thresholds: Numerical thresholds remain explicitly unresolved/undefined (`"NOT YET DEFINED — REQUIRES HUMAN APPROVAL"`), awaiting operator definition.
+- **Step 67 Feasibility Inspection Findings:**
+  - Evaluated candidate engineering mechanisms to observe `GUIDE_ACCESS` against the live GitHub Pages `/docs` deployment and VentureBot evidence taxonomy.
+  - Option 1 (Serverless Edge Webhook): Technically viable with low overhead, but requires external cloud hosting and an unauthenticated public receiver susceptible to beacon blocking and synthetic inflation.
+  - Option 2 (GitHub Actions / Repository Dispatch): **NOT VIABLE** due to critical security risk (client-side GitHub token exposure) or requiring an intermediary proxy that collapses into Option 1 with API rate-limit bottlenecks.
+  - Option 3 (Static Object-Storage Asset Fetch with Access Logging): Architecturally viable with zero client-side JavaScript and native immutable server logs, but subject to log ingestion propagation latency (1–2 hours) and requires external cloud bucket provisioning.
+  - Option 4 (Static Hosted Redirection Gateway): Architecturally viable with zero client-side JavaScript, but introduces a single point of failure in the user funnel, external server latency, and potential ad platform redirect scrutiny.
+  - Established Epistemic Demarcation: Documented strict non-equivalences separating request received, asset served, page navigation, human viewing, reading comprehension, perceived value, conversion, and revenue.
+  - Identified Smallest Viable Implementation Shape: A zero-PII server-side access mechanism (either edge beacon receiver or storage asset fetch) isolated from client secrets.
+  - Preserved Operator Boundaries: No technology chosen, no infrastructure deployed, no code altered, no numerical thresholds invented.
 - **Explicit Safety Boundaries Maintained:**
   - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
   - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 66)
+  - Capital Transactions: 0 (No transactions created by Step 67)
   - Capital Balance: Starting capital ₹1,000.00, liquid ₹1,000.00, available unallocated ₹1,000.00
   - Actual Spend: ₹0.00
   - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
@@ -2771,6 +2772,168 @@ Step 65 documented multiple candidate technical mechanisms (Option 1: Serverless
 
 ### Final Classification
 **HUMAN MEASUREMENT SCOPE DECISION RECORDED — PATH B SELECTED — IMPLEMENTATION DEFERRED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 67 — Guide Access Implementation Feasibility Inspection
+
+### 1. Inspection Context & Constraints
+- **Scope:** Read-only engineering feasibility inspection of candidate architectures to observe `GUIDE_ACCESS`.
+- **Preceding Decisions:** Path B (on-site measurement required before pilot execution) formally selected by the human operator in Step 66.
+- **Signal Boundary:** Target event is `GUIDE_ACCESS` (a verified request/access event for the controlled guide resource).
+- **Prohibitions Maintained:** Zero code modifications, zero infrastructure deployed, zero credentials generated, zero capital allocated, zero experiment status mutation (strictly `DRAFT`).
+
+### 2. Current Deployment Facts
+- **Hosting Environment:** Static GitHub Pages served from the `/docs` directory of the `Vishnu3568/venturebot` repository on branch `main`.
+- **Assets Live:** `index.html` (landing page) and `guide.html` (static guide) at `https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/`.
+- **Backend Architecture:** VentureBot backend is a local Python CLI/library with zero public HTTP listening ports, zero incoming webhook receivers, and zero server-side runtime on GitHub Pages.
+- **Workflow State:** No `.github/` workflow directory currently exists in the repository.
+- **Access Logs:** GitHub Pages CDN provides zero access logs, visitor telemetry, or webhook streaming to repository owners.
+
+### 3. Option-by-Option Feasibility Analysis
+
+#### OPTION 1: Lightweight Serverless / Edge Measurement Endpoint
+1. *GitHub Pages Interaction:* Landing page or guide page executes client-side JavaScript (`fetch()` or `navigator.sendBeacon()`) to transmit an anonymous ping to an external edge endpoint upon CTA click or page load.
+2. *Authoritative FACT Generation:* YES. Edge worker logs the request with ISO timestamp and increments an atomic counter mapped to `experiment_id`.
+3. *Infrastructure Required:* Cloud serverless function (e.g. Cloudflare Worker, Google Cloud Run/Functions, AWS Lambda) and an atomic persistence store (e.g. Cloudflare KV, Redis, Firestore).
+4. *External Accounts / Providers:* YES. Requires an external cloud platform account (e.g. Cloudflare or GCP).
+5. *Credentials / Secrets:* Browser: ZERO secrets (must remain strictly unauthenticated or CORS-origin restricted). Backend: Requires read API key or service account token for VentureBot to fetch aggregate telemetry.
+6. *Sensitive Browser Information:* None. Payload is anonymous JSON: `{"event": "guide_access", "experiment_id": "49fde874-9387-5056-934c-51a9cfca164f"}`.
+7. *IP / PII Persistence:* Edge platforms log client IP addresses by default. Worker code must be explicitly programmed to discard IP addresses immediately, storing only aggregate UTC event counts.
+8. *Spoofing / Duplication:* HIGH vulnerability to synthetic requests. An unauthenticated public endpoint can be called by bots or curl scripts.
+9. *Duplicate Event Handling:* Debounce or rate-limit at the edge (e.g. in-memory IP hash table in ephemeral worker memory), recording at most 1 count per short window before discarding.
+10. *Experiment Association:* Experiment ID is in the beacon payload; event timestamps provide logical reporting window bounds (`date_start`, `date_stop`).
+11. *Retrieval by VentureBot:* Backend calls secure authenticated GET endpoint, ingesting as `EvidenceCategory.FACT` with `source_reference = edge:telemetry:event:guide_access:49fde874:<date_start>:<date_stop>`.
+12. *Operational Burden:* Moderate. Requires maintaining external cloud function, monitoring availability, and ensuring CORS compatibility.
+13. *Repository Changes:* Client-side beacon script in `index.html`/`guide.html`; backend edge ingestion service and data contract.
+14. *Deployment Changes:* Provisioning and deploying the serverless edge worker.
+15. *Failure Modes:* Browser ad blockers / privacy extensions (e.g. uBlock, Brave Shields) blocking beacon calls; edge worker downtime; CORS misconfiguration; synthetic bot traffic.
+16. *What It Cannot Prove:* Confirms only that a client browser executed an HTTP beacon; does not prove human reading, comprehension, value, or problem validation.
+
+#### OPTION 2: GitHub Repository Dispatch / GitHub Actions Based Measurement
+1. *GitHub Pages Interaction:* Client-side JavaScript calls GitHub API (`POST /repos/Vishnu3568/venturebot/dispatches`) when a user accesses the guide.
+2. *Authoritative FACT Generation:* Theoretical (workflow run log), but practically non-viable.
+3. *Infrastructure Required:* `.github/workflows/record_event.yml` and an intermediary server-side token proxy.
+4. *External Accounts / Providers:* GitHub (existing repository), plus intermediary proxy host.
+5. *Credentials / Secrets:* **CRITICAL SECURITY BLOCKER**: Triggering a `repository_dispatch` requires an authenticated GitHub Personal Access Token (PAT) with repository write permissions. Placing a PAT in public client-side JavaScript allows any visitor to inspect the page and obtain full administrative write access to the repository. If an intermediary proxy is deployed to protect the token, the architecture regresses into Option 1.
+6. *Sensitive Browser Information:* Severe risk of secret leakage if executed directly from client.
+7. *IP / PII Persistence:* GitHub Actions logs may record runner metadata and commit/dispatch payloads.
+8. *Spoofing / Duplication:* High risk of abuse; public triggering could exhaust GitHub Actions minute quotas.
+9. *Duplicate Event Handling:* Workflow run queues have latency (seconds to minutes) and strict rate limits (60/hr unauthenticated, 5,000/hr authenticated).
+10. *Experiment Association:* Embedded in dispatch event payload.
+11. *Retrieval by VentureBot:* Query GitHub Actions API for successful workflow runs.
+12. *Operational Burden:* High. GitHub Actions is a continuous integration system, not a real-time event analytics queue.
+13. *Repository Changes:* Workflow definition files, client-side dispatcher script, backend GitHub API client.
+14. *Deployment Changes:* Intermediary proxy provisioning, repository secret configuration.
+15. *Failure Modes:* Credential leakage; GitHub API rate limits; queue backlog delays; runner outages.
+16. *What It Cannot Prove:* Confirms only an API dispatch; proves nothing about reading or value.
+*Feasibility Verdict on Option 2:* **NOT VIABLE** due to unacceptable security risks or architectural redundancy.
+
+#### OPTION 3: Dedicated Static Asset / Object-Storage Access Logging
+1. *GitHub Pages Interaction:* The CTA links directly to a dedicated downloadable asset (e.g. `solopreneur-financial-workflow-guide.pdf`) or `guide.html` fetches an embedded signal asset (e.g. 1x1 image asset) hosted on a cloud storage bucket with native access logging enabled.
+2. *Authoritative FACT Generation:* YES. Native server-side access logs produced by object storage (e.g. GCS, AWS S3) are immutable, authoritative `FACT` records generated by cloud infrastructure.
+3. *Infrastructure Required:* Cloud object storage bucket with server access logging enabled (target log bucket).
+4. *External Accounts / Providers:* YES. Cloud storage provider (e.g. Google Cloud Storage or AWS S3).
+5. *Credentials / Secrets:* Browser: ZERO secrets. The asset link is a standard public HTTP GET request with zero client-side JavaScript required. Backend: Storage bucket read credentials (e.g. GCP ADC or IAM service account) to pull access logs.
+6. *Sensitive Browser Information:* None. Standard HTTP GET request.
+7. *IP / PII Persistence:* Storage logs record client IP addresses. VentureBot's local log parser MUST parse the log, count valid HTTP 200 GET requests, and discard client IP addresses and user agents, persisting only aggregate numbers in SQLite to ensure zero IP persistence.
+8. *Spoofing / Duplication:* Subject to search crawler requests, but bot user agents can be filtered out during log parsing.
+9. *Duplicate Event Handling:* Aggregated by timestamp intervals; duplicate rapid hits from the same IP/subnet can be filtered during log aggregation before persistence.
+10. *Experiment Association:* Asset path contains experiment ID (e.g. `/pilot-49fde874/guide.pdf`); log records contain exact UTC timestamps.
+11. *Retrieval by VentureBot:* Backend ingestion script reads storage log bucket, extracts matching requests within `[date_start, date_stop]`, and persists an immutable `ExperimentMetrics` row with `source_reference = gcs:access_log:bucket:object:<date_start>:<date_stop>`.
+12. *Operational Burden:* Low-to-moderate. Cloud storage buckets are highly durable and maintenance-free; operational burden is limited to periodic log fetching and parsing.
+13. *Repository Changes:* Link CTA to static storage asset or embed asset in `guide.html`; backend log parser service.
+14. *Deployment Changes:* Cloud storage bucket creation, CORS/public-read policy, and logging configuration.
+15. *Failure Modes:* Log delivery propagation latency (cloud storage access logs can take 1 to 2 hours to be written to the log bucket); log parsing schema mismatches; network failures during asset download.
+16. *What It Cannot Prove:* Confirms only that the asset was fetched by a client; does not prove human reading comprehension or problem validation.
+
+#### OPTION 4: Static Hosted Redirection Gateway
+1. *GitHub Pages Interaction:* Landing page CTA links to an intermediate hosted redirect URL (e.g. `https://gateway.../r/49fde874/guide`), which logs an HTTP 302/307 redirect and immediately forwards the browser to `https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/guide.html`.
+2. *Authoritative FACT Generation:* YES. Gateway access logs record the HTTP redirect request as a verified server-side `FACT`.
+3. *Infrastructure Required:* Hosted web service or CDN edge routing rule (e.g. minimal FastAPI/Go container on Cloud Run or Cloudflare Redirect Worker).
+4. *External Accounts / Providers:* YES. Cloud or hosting platform providing a public HTTPS URL.
+5. *Credentials / Secrets:* Browser: ZERO secrets. Standard HTML `<a href="...">` link with zero client JavaScript. Backend: Admin API key or database connection to retrieve redirect counts.
+6. *Sensitive Browser Information:* None. Standard HTTP GET.
+7. *IP / PII Persistence:* Web server logs HTTP headers. Gateway must be configured to discard IP addresses or hash them ephemerally, storing only aggregate click timestamps.
+8. *Spoofing / Duplication:* Automated crawlers following links will trigger redirects; rapid repeated clicks can be debounced.
+9. *Duplicate Event Handling:* Debounced by gateway or aggregated during ingestion.
+10. *Experiment Association:* The URL route contains the experiment ID (`/r/49fde874/guide`).
+11. *Retrieval by VentureBot:* Backend queries gateway API for aggregate redirect counts in the reporting window.
+12. *Operational Burden:* Moderate. Requires running an active web service. **CRITICAL RISK:** The redirect gateway becomes a single point of failure—if the gateway service is down, the user funnel breaks and visitors cannot reach `guide.html`. Furthermore, ad platforms (Meta) frequently flag intermediate domain hops/redirects as policy violations or suspicious link cloaking.
+13. *Repository Changes:* Update CTA link `href` in `index.html`; backend gateway ingestion service.
+14. *Deployment Changes:* Provision and maintain hosted redirect gateway service with HTTPS certificate.
+15. *Failure Modes:* Gateway service downtime breaking the entire funnel; Meta ad review rejection due to redirect URL; network latency added to navigation.
+16. *What It Cannot Prove:* Confirms navigation redirect was triggered; does not prove the destination page completed loading or that content was read.
+
+---
+
+### 4. Epistemic Hierarchy & Evidence Rules
+
+VentureBot enforces strict epistemic separation between the following observable and unobservable stages:
+
+```text
+[HTTP Request Received]
+  ↓ (Network layer confirmation)
+[Asset Served / Delivered]
+  ↓ (Client browser receives bytes)
+[Browser Navigation Occurred]
+  ↓ (DOM loaded on client device)
+[Human Viewed Content] (UNOBSERVED — could be background tab, bot, or instant bounce)
+  ↓
+[Human Read Content] (UNOBSERVED — requires verified dwell time / eye-tracking)
+  ↓
+[Human Understood Content] (UNOBSERVED — requires cognitive evaluation)
+  ↓
+[Human Valued Content] (UNOBSERVED — requires qualitative feedback / problem resonance)
+  ↓
+[Conversion Occurred] (UNOBSERVED — no commercial action exists in pilot)
+  ↓
+[Revenue Generated] (UNOBSERVED — unmonetized pilot)
+```
+
+The `GUIDE_ACCESS` signal confirms strictly that an **HTTP request was received and asset served**. Collapsing this signal into proof of readership, problem validation, or conversion is explicitly prohibited by Architecture Section 17 & 18.
+
+---
+
+### 5. Security & Privacy Audit Findings
+
+* **Client-Side Secrets:** Zero secrets may ever be placed in `index.html` or `guide.html`. Any design requiring client authentication tokens (such as Option 2) is a severe vulnerability and cannot be accepted.
+* **Public Unauthenticated Endpoints:** Options 1 and 4 rely on publicly reachable endpoints. They must implement rate-limiting and origin validation to mitigate spam/abuse.
+* **Privacy & PII:** In any option utilizing server logs (Options 1, 3, 4), incoming IP addresses must be stripped immediately upon ingestion; SQLite persistence must contain aggregate event counts only.
+* **Third-Party Surveillance:** Embedding third-party analytics (Google Analytics, Meta Pixel) is architecturally prohibited.
+
+---
+
+### 6. Technical Feasibility Conclusion
+
+* **A. Compatible Options:**
+  - **Option 1 (Serverless Edge Webhook):** Architecturally viable. Low operational footprint, but requires external cloud hosting and an unauthenticated public receiver susceptible to ad-blocker suppression.
+  - **Option 3 (Static Object-Storage Asset Fetch with Access Logging):** Architecturally viable. Zero client-side JavaScript, zero client secrets, native immutable cloud access logging, but subject to log propagation latency (1–2 hours) and requires cloud storage bucket management.
+  - **Option 4 (Static Hosted Redirection Gateway):** Conditionally viable, but introduces a single point of failure in the user journey and carries Meta ad policy redirect risks.
+* **B. Non-Viable Options:**
+  - **Option 2 (GitHub Repository Dispatch):** **NOT VIABLE**. Requires exposing write tokens in client-side JavaScript or provisioning an intermediary proxy that renders the GitHub Action redundant.
+* **C. Smallest Viable Implementation Shape:**
+  The smallest viable implementation that satisfies all privacy, security, and architectural constraints without adding client secrets or breaking static GitHub Pages hosting is:
+  * A dedicated cloud asset request (Option 3: e.g. CTA downloads or fetches an immutable guide PDF asset from a cloud storage bucket with native server access logging) OR a minimal zero-PII edge ping endpoint (Option 1). Both keep GitHub Pages fully static and isolate VentureBot from client credentials.
+* **D. External Prerequisites:**
+  Any on-site measurement implementation requires provisioning external cloud infrastructure (e.g. GCP Cloud Storage or Cloudflare Worker) that is not currently configured in the repository.
+* **E. Unresolved Decisions Reserved for Human Operator:**
+  1. Selection of the specific engineering architecture (e.g. Option 1 vs. Option 3).
+  2. Provider and account approval for hosting the external telemetry endpoint or storage bucket.
+  3. Definition of numerical success and failure thresholds.
+
+---
+
+### 7. Safety Invariants & Final Classification
+- **Capital State:** Starting capital ₹1,000.00, liquid ₹1,000.00, active allocations ₹0.00, available unallocated capital ₹1,000.00, actual spend ₹0.00, capital transactions = 0.
+- **Meta State:** 0 live write requests, 0 campaigns/ad sets/ads created, 0 external executions, ₹0.00 Meta spend.
+- **SAFE_MODE:** `True` (enforced).
+- **Experiment Status:** Strictly `DRAFT` (no mutation).
+- **Application Code Changes:** 0.
+
+### Final Classification
+**GUIDE_ACCESS FEASIBILITY INSPECTION COMPLETE — CANDIDATE ARCHITECTURES EVALUATED — IMPLEMENTATION NOT STARTED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 
 
