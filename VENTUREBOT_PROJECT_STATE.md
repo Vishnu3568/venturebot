@@ -55,29 +55,28 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.36 — Pilot Experiment Definition / Evidence Compatibility Audit (Step 64)
+V1.37 — Pilot Measurement Scope Decision Preparation (Step 65)
 
 ---
 
 ## Current Status
 
-Step 64 — Pilot Experiment Definition / Evidence Compatibility Audit Complete
+Step 65 — Pilot Measurement Scope Decision Preparation Complete
 
-- **Step 64 Audit Findings:**
-  - Audited persisted Experiment `49fde874-9387-5056-934c-51a9cfca164f` derived from Opportunity `63667b67-8482-519c-a498-251047e4b3ec`.
-  - Constructed comprehensive 14-item Evidence Compatibility Matrix:
-    * Fully Compatible: Ad impressions, Ad link clicks, Ad spend/cost (authoritative Meta Graph API Insights).
-    * Partially Compatible: CPC, CPM, CTR (available in transient Meta payload, derivable, but not stored in `ExperimentMetrics` table schema); Revenue/Profit/ROI/ROAS (unmonetized pilot; correctly evaluated as `None`).
-    * Not Currently Observable: Landing page visits, Guide page accesses, Guide reading engagement, Conversions.
-    * Undefined: Human operational success and failure thresholds (currently marked "NOT YET DEFINED — REQUIRES HUMAN APPROVAL").
-  - Evaluated Hypothesis Testability: Current telemetry tests whether ad creative generates link clicks on Meta, but cannot test whether users access, read, or derive value from the workflow guide on GitHub Pages.
-  - Confirmed Architecture & Reporting Compatibility: Ingestion of Meta-only observations adheres strictly to Section 24 and the invariant `RESTATEMENT != NEW PERFORMANCE PERIOD`.
-  - Identified Unresolved Evidence Boundary: Before approving the experiment, the human operator must explicitly decide whether to proceed with an Ad-Only Link-Click Demand Pilot or defer execution until on-site telemetry is implemented, and must supply concrete numerical success/failure thresholds.
+- **Step 65 Decision-Preparation Findings:**
+  - Prepared factual, read-only decision surface for the human operator across the two scope paths identified in Step 63 and Step 64.
+  - Re-verified experiment purpose and persistent entities: Experiment `49fde874-9387-5056-934c-51a9cfca164f` (DRAFT) and Opportunity `63667b67-8482-519c-a498-251047e4b3ec` (DISCOVERED).
+  - Documented Path A (Ad-Level Link-Click Demand Test Only): Measures top-of-funnel link click interest via Meta Insights; leaves on-site reading and guide consumption unobserved.
+  - Documented Path B (On-Site Measurement Required Before Pilot Approval): Details factual characteristics of the four Step 63 technical options (Serverless Edge Webhook, GitHub Repo Dispatch, Storage Asset Fetch with Access Logging, Redirect Gateway) without ranking or selecting an option.
+  - Built 9-dimension neutral comparison table and 8-claim evidence boundary table using canonical architecture classifications.
+  - Documented threshold boundary: Success and failure thresholds remain explicitly undefined (`"NOT YET DEFINED — REQUIRES HUMAN APPROVAL"`), requiring human operator benchmark determination.
+  - Formulated the exact Human Decision Required (Decision 1: Scope limitation vs. prerequisite on-site telemetry; Decision 2: Numerical success/failure thresholds) without recommending or selecting an answer.
 - **Explicit Safety Boundaries Maintained:**
   - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
   - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 64)
+  - Capital Transactions: 0 (No transactions created by Step 65)
   - Capital Balance: Starting capital ₹1,000.00, liquid ₹1,000.00, available unallocated ₹1,000.00
+  - Actual Spend: ₹0.00
   - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
   - Meta Spend: ₹0.00
   - SAFE_MODE: True (Enabled by default; unconditionally blocks deployment)
@@ -2551,6 +2550,156 @@ Before the experiment can be considered for approval, the following boundary mus
 
 ### Final Classification
 **PILOT DEFINITION AUDITED — EVIDENCE GAP IDENTIFIED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 65 — Pilot Measurement Scope Decision Preparation
+
+### 1. Control Documents Checked
+- `VENTUREBOT_PROJECT_STATE.md` (authoritative current state through Step 64)
+- `VENTUREBOT_ARCHITECTURE.md` (Sections 1, 2, 3, 16, 17, 18, 24)
+- Current repository inspection (`tests/test_pilot_persistence.py`, `backend/venturebot/models/`, `backend/venturebot/measurement/`)
+- Step 63 Controlled Pilot Measurement Capability Design Inspection findings
+- Step 64 Pilot Experiment Definition / Evidence Compatibility Audit findings
+
+### 2. Current Persisted Pilot State
+- **Experiment ID:** `49fde874-9387-5056-934c-51a9cfca164f`
+- **Opportunity ID:** `63667b67-8482-519c-a498-251047e4b3ec`
+- **Experiment Status:** `DRAFT`
+- **Proposed Budget:** ₹200.00 (`allocated_budget` ceiling; not allocated in ledger)
+- **Max Allowed Spend:** ₹200.00 (`max_allowed_spend` hard ceiling)
+- **Capital Allocated in Ledger:** ₹0.00
+- **Actual Spend:** ₹0.00
+- **Starting Capital:** ₹1,000.00
+- **Current Liquid Balance:** ₹1,000.00
+- **Available Unallocated Capital:** ₹1,000.00
+- **Capital Transactions:** 0
+- **Meta Writes:** 0
+- **Meta Spend:** ₹0.00
+- **SAFE_MODE:** `True`
+- **Approval:** None granted
+
+### 3. Re-Verification of Actual Experiment Purpose
+- **A. What the Opportunity is trying to validate:**
+  Whether a targeted informational workflow guide addressing invoicing and cash-flow friction generates measurable interest among Indian independent workers.
+- **B. What the current Experiment hypothesis literally says:**
+  *"Presenting a targeted informational workflow guide to Indian solopreneurs and freelancers via Meta platforms will generate link clicks to a problem-validation landing page."*
+- **C. What the current Experiment can actually observe:**
+  External advertising telemetry provided by Meta Graph API Insights: ad impressions, ad link clicks, ad spend, CPC, CPM, CTR, and delivery/policy/billing events.
+- **D. What the original Opportunity would ideally require to establish:**
+  Whether independent workers in India actually arrive at the landing page, navigate to and read the guide, find the operational syllabus valuable for reducing cash-flow friction, and indicate an intention to use or retain it.
+
+### 4. Path A: Ad-Level Link-Click Demand Test Only
+Under this scope boundary, the experiment intentionally measures only what Meta Graph API Insights can authoritatively provide.
+- **Currently Observable Metrics:**
+  - Ad impressions (delivered ad impressions)
+  - Ad link clicks (clicks on ad creative leading to landing page URL)
+  - Spend (actual advertising cost disbursed to Meta)
+  - CPC (cost per link click, derived/transient)
+  - CPM (cost per 1,000 impressions, derived/transient)
+  - CTR (click-through rate, derived/transient)
+  - Delivery, account billing, and policy rejection events
+- **What Path A Does NOT Establish:**
+  - Landing-page visits (whether users who clicked actually loaded `index.html`)
+  - Guide accesses (whether users navigated to `guide.html`)
+  - Guide reading (whether users viewed syllabus sections)
+  - Scrolling / dwell time
+  - Printing / saving actions
+  - Guide engagement (qualitative interaction or utility)
+  - Problem validation beyond top-of-funnel ad-level click interest
+  - Conversions
+  - Revenue or commercial viability
+
+### 5. Path B: On-Site Measurement Required Before Pilot Approval
+Under this scope boundary, the pilot is not approved or executed until an authoritative, VentureBot-accessible on-site measurement capability exists.
+Factual characteristics of the candidate options documented in Step 63:
+- **Option 1: Lightweight Serverless / Edge Webhook Endpoint (Cloudflare Worker / Cloud Run):**
+  * *Signal Provided:* Anonymous HTTP request count when CTA is clicked or `guide.html` is loaded (`guide_access` event).
+  * *Infrastructure Introduced:* Hosted serverless script, outbound beacon in static HTML, local log ingestion service.
+  * *Evidence Type / Source Reference:* `FACT` / `edge:telemetry:event:guide_access:49fde874:<date_start>:<date_stop>`.
+  * *Privacy / Security:* Zero PII, no cookies, no IP persistence in SQLite, aggregate counts only.
+  * *Known Limitations:* Client-side beacons may be blocked by content blockers; confirms HTTP request, not human comprehension.
+- **Option 2: GitHub Repository Dispatch / Webhook Trigger:**
+  * *Signal Provided:* GitHub Actions repository dispatch event triggered by client-side JavaScript.
+  * *Infrastructure Introduced:* Intermediary authentication proxy, `.github/workflows/record_event.yml`.
+  * *Evidence Type / Source Reference:* `FACT` / `github:action:run:<run_id>`.
+  * *Privacy / Security:* Severe security risk if authentication tokens are exposed client-side; requires proxy.
+  * *Known Limitations:* GitHub API rate limits, run execution latency, operational complexity.
+- **Option 3: Static Pre-Signed Storage URL / Asset Fetch (Cloud Storage / S3 / R2 Asset Logging):**
+  * *Signal Provided:* Standard HTTP server access log entry when a dedicated static asset (e.g. `solopreneur-financial-workflow-guide.pdf` or 1x1 signal asset) is requested.
+  * *Infrastructure Introduced:* Object storage bucket with access logging enabled, local log fetcher/parser.
+  * *Evidence Type / Source Reference:* `FACT` / `gcs:access_log:bucket:object:<date_start>:<date_stop>`.
+  * *Privacy / Security:* Zero client-side JavaScript tracking; standard HTTP server access logs.
+  * *Known Limitations:* Confirms asset retrieval, but cannot measure reading dwell time or section engagement.
+- **Option 4: Static Hosted Redirection Gateway:**
+  * *Signal Provided:* HTTP 302 redirect access log entry when CTA routes through an intermediate redirector route (`/access-guide`) before loading `guide.html`.
+  * *Infrastructure Introduced:* Hosted redirect service or CDN edge routing rule, redirect log ingestor.
+  * *Evidence Type / Source Reference:* `FACT` / `gateway:redirect:access-guide:<date_start>:<date_stop>`.
+  * *Privacy / Security:* Zero client-side tracking script; standard gateway access logs.
+  * *Known Limitations:* Confirms redirect activation; does not observe time-on-page or syllabus readership on final destination.
+
+### 6. Neutral Scope Comparison
+
+| Dimension | Path A: Ad-Level Link-Click Test | Path B: On-Site Measurement Required |
+|---|---|---|
+| **Primary observable** | Ad impressions, link clicks, ad spend | On-site page / asset access events (e.g. guide view or download) |
+| **Authoritative source** | Meta Graph API Insights | Edge webhook / server access log / redirect gateway log |
+| **Landing-page visibility** | Not observable (remains unknown) | Observable if gateway/webhook/asset fetch instrumented on landing page |
+| **Guide access visibility** | Not observable (remains unknown) | Observable via asset request, redirect log, or edge ping |
+| **Guide engagement visibility** | Not observable | Not observable (reading/scrolling remains unmeasured without deep client instrumentation) |
+| **Infrastructure required** | Zero new infrastructure (uses existing adapter & ingestion service) | External hosted endpoint, storage bucket with logging, or redirect gateway |
+| **Meta dependency** | Dependent exclusively on Meta Graph API | Dependent on Meta for ad delivery + independent on-site infrastructure for engagement |
+| **Capital impact before implementation** | ₹0.00 capital spent / ₹0.00 new hosting cost | ₹0.00 capital spent (free-tier options available), but requires engineering setup |
+| **Evidence limitation** | Confirms ad creative interest; cannot confirm landing page arrival or guide consumption | Confirms page/asset delivery; cannot prove reading comprehension, qualitative value, or problem validation |
+
+### 7. Success / Failure Threshold State
+- **Current Persisted Criteria:**
+  * Success Criteria: `"Observable telemetry: total spend <= ₹200.00, successful delivery and link clicks recorded. Human success threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+  * Failure Criteria: `"Observable telemetry: zero delivery, policy rejection, or account billing error. Human failure threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."`
+- **Currently Available Observations:**
+  Meta Graph API Insights can authoritatively report: `impressions`, `clicks`, `spend`, `cpc`, `cpm`, and `ctr`.
+- **Undefined Thresholds:**
+  Numerical targets (e.g. minimum acceptable link clicks, target CTR, maximum acceptable CPC, stop-loss spend triggers) are explicitly undefined.
+- **Why Human Decision is Required:**
+  Architecture Section 17 & 24 and the Anti-Hallucination rules prohibit autonomous fabrication of commercial targets, metric thresholds, or scoring formulas. VentureBot cannot determine whether a given CPC or CTR constitutes "success" without an explicit operator-approved benchmark.
+
+### 8. Evidence Boundary
+
+| Claim | Authoritative Evidence Currently Available? | Current Status |
+|---|---|---|
+| **Meta ad was delivered** | YES (Meta Graph API Insights: `impressions > 0`) | `COMPATIBLE` |
+| **User clicked Meta ad** | YES (Meta Graph API Insights: `clicks > 0`) | `COMPATIBLE` |
+| **User reached landing page** | NO (GitHub Pages provides zero access logs to VentureBot) | `NOT CURRENTLY OBSERVABLE` |
+| **User accessed guide** | NO (No server-side request logging exists for `guide.html`) | `NOT CURRENTLY OBSERVABLE` |
+| **User read guide** | NO (No reading telemetry, scroll tracking, or time-on-page tracking exists) | `NOT CURRENTLY OBSERVABLE` |
+| **User valued guide** | NO (Qualitative assessment; no user rating or feedback mechanism exists) | `UNDEFINED` |
+| **User converted** | NO (Non-transactional pilot; no conversion event, checkout, or lead capture) | `NOT CURRENTLY OBSERVABLE` |
+| **User generated revenue** | NO (Unmonetized problem-validation pilot; no payment gateway) | `REQUIRES EXTERNAL EVIDENCE` |
+
+### 9. Human Decision Required
+
+The human operator must resolve two explicit decisions before the pilot experiment can proceed:
+
+**DECISION 1:**
+Should the pilot's measurement scope be limited to Meta ad-level link-click demand?
+OR
+Should on-site measurement be treated as a prerequisite before approval?
+
+**DECISION 2:**
+What success/failure criteria should be explicitly defined for the selected scope?
+
+*(VentureBot makes no recommendation and selects no option. Both decisions remain strictly reserved for the human operator).*
+
+### 10. Safety Verification & Invariants Maintained
+- **Capital State:** Starting capital ₹1,000.00, liquid balance ₹1,000.00, active allocations ₹0.00, available unallocated capital ₹1,000.00, actual spend ₹0.00, capital transactions = 0.
+- **Meta State:** 0 live write requests, 0 campaigns/ad sets/ads created, 0 external executions, ₹0.00 Meta spend.
+- **SAFE_MODE:** `True` (enforced).
+- **Experiment Status:** Strictly `DRAFT` (no mutation).
+- **Application Code Changes:** 0.
+
+### Final Classification
+**PILOT MEASUREMENT SCOPE DECISION PREPARED — NO HUMAN DECISION MADE — NO IMPLEMENTATION — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 
 
