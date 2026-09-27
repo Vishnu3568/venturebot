@@ -55,27 +55,26 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.34 — Pilot Measurement / Conversion-Path Gap Inspection (Step 62)
+V1.35 — Controlled Pilot Measurement Capability Design Inspection (Step 63)
 
 ---
 
 ## Current Status
 
-Step 62 — Pilot Measurement / Conversion-Path Gap Inspection Complete
+Step 63 — Controlled Pilot Measurement Capability Design Inspection Complete
 
-- **Step 62 Inspection Findings:**
-  - Conducted read-only inspection of the current pilot's measurement capability without adding tracking scripts, analytics, cookies, pixels, backends, forms, or databases.
-  - **Landing Page Measurement Capability:** Purely static HTML. No event listeners, no client-side beacons, no server-side access logs available from GitHub Pages CDN. Zero on-site actions are currently observable by VentureBot.
-  - **Guide Page Measurement Capability:** Purely static HTML. Clicking "Print or Save as PDF" (`window.print()`) triggers the browser's native print dialog without sending any signal to VentureBot. Zero on-site guide opens, reading events, or downloads are observable.
-  - **Crucial Distinction:** While the landing page and guide technically support user actions (reading, clicking CTA, printing/saving PDF), **VentureBot has zero evidence that any on-site action occurred**.
-  - **Measurable Metrics (via existing Meta Insights capability if executed):** `impressions`, `clicks` (ad link clicks), `cost` (ad spend), `cpc`, `cpm`, `ctr`.
-  - **Non-Measurable Metrics (on-site):** `visitors` (pageviews), CTA clicks, guide opens, reading depth/completion, guide downloads/prints, `conversions`, and on-site `conversion_rate`.
-  - **Experiment Implication:** If an ad campaign were run, VentureBot could measure ad traffic interest (clicks to the URL), but on-site engagement and guide delivery would remain a complete black box.
-  - **Next-Step Boundary:** Step 62 is strictly an inspection and gap-identification step. Next step requires human operator review of these findings.
+- **Step 63 Design Inspection Findings:**
+  - Evaluated existing capabilities: backend is local Python library/CLI with zero public HTTP listeners; GitHub Pages CDN provides zero access logs or visitor streaming to VentureBot.
+  - Defined candidate minimum observable events distinguishing ad arrival from intentional guide engagement:
+    * Event A: CTA Activation / Guide Page Access (intention to read the guide).
+    * Event B: Guide PDF Download / Print Action (intention to save/retain the guide).
+  - Documented five architectural options neutrally (Serverless Edge Webhook, GitHub Repo Dispatch/Webhook, Static Pre-Signed Storage Asset/PDF Fetch with Access Logging, Static Redirect Gateway, or Re-scoping Strictly to Ad-Level Telemetry).
+  - Established rigorous Evidence Contract requiring verifiable timestamps, canonical `source_reference`, zero metric fabrication, and strict data minimization (zero PII, zero cookies, zero fingerprinting).
+  - Enforced strict decision boundary: no winner selected, no scoring formulas applied. Implementation deferred to human review.
 - **Explicit Safety Boundaries Maintained:**
   - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
   - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 62)
+  - Capital Transactions: 0 (No transactions created by Step 63)
   - Capital Balance: ₹1,000.00 liquid, ₹1,000.00 available unallocated
   - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
   - Meta Spend: ₹0.00
@@ -2321,6 +2320,103 @@ Step 62 is strictly an inspection and gap-identification step. Next steps requir
 
 ### Final Classification
 **PILOT MEASUREMENT GAP IDENTIFIED — READ-ONLY INSPECTION COMPLETE — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 63: Controlled Pilot Measurement Capability — Design Inspection
+
+### Objective
+Design the smallest controlled measurement capability that could provide ONE authoritative empirical signal from the pilot experience without introducing unnecessary infrastructure. This was strictly a design and feasibility inspection; zero measurement capabilities were implemented, zero application code was changed, and zero new cloud resources were deployed.
+
+### 1. Existing Capability Inspection
+- **Backend Services (`backend/venturebot/`):** Python library and CLI runner. Not deployed as a daemon or server; zero public network exposure or inbound HTTP listeners.
+- **FastAPI / REST Endpoints:** None exist in the codebase.
+- **Hosting Infrastructure:** Static deployment on GitHub Pages (`https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/`). Serves static HTML over Fastly/GitHub edge CDN. Provides zero access logs, visitor streaming, or webhooks to VentureBot.
+- **Persistence Layer:** SQLite with SQLAlchemy ORM (`MetricsRepository`, `ExperimentMetricsORM`). Natively supports `impressions`, `clicks`, `visitors`, `conversions`, `revenue`, `cost`, `roas`, `roi`.
+- **Existing Telemetry Ingestion:** `MetaTelemetryIngestionService` can ingest read-only Meta Graph API campaign `/insights` (`impressions`, link `clicks`, ad `cost`). It cannot observe on-site events.
+- **Evidence Framework:** Strictly enforces Sections 17 & 24 of `VENTUREBOT_ARCHITECTURE.md`: zero metric fabrication; every metric snapshot requires a verifiable `source_reference` and `FACT` classification.
+
+### 2. Minimum Observable Event Definition
+To distinguish external ad click / arrival from actual on-site guide access or intentional interaction, two primary candidate events were evaluated:
+- **Candidate Event A: Guide Page Access / CTA Activation**
+  - *Trigger:* Visitor clicks `"Get the Workflow Guide"` or browser loads `guide.html`.
+  - *Significance:* Distinguishes top-of-funnel ad click from intentional transition to consuming the promised educational syllabus.
+- **Candidate Event B: Guide PDF Download / Print Action**
+  - *Trigger:* Visitor activates `"Print or Save as PDF"` (`window.print()`) or requests a static PDF asset (`solopreneur-financial-workflow-guide.pdf`).
+  - *Significance:* Distinguishes passive page loading from an explicit decision to retain and use the offline workflow guide.
+
+### 3. Candidate Architectural Options
+
+#### Option 1: Lightweight Serverless / Edge Webhook Endpoint (e.g. Cloudflare Worker / Cloud Run)
+- **Mechanism:** Minimal HTTP endpoint receiving an anonymous ping on CTA click or guide view; increments an atomic counter.
+- **Components:** Outbound beacon in static HTML; serverless endpoint script; local ingestion service.
+- **New Infrastructure:** Requires a hosted serverless endpoint (free-tier).
+- **Data Stored:** Timestamp, event type (`guide_access`), experiment ID (`49fde874`). Zero PII.
+- **Evidence Type / Source Reference:** `FACT` / `edge:telemetry:event:guide_access:49fde874:<date_start>:<date_stop>`.
+- **Reconciliation / Meta Independence:** Fully reconcilable by date range; operates independently of Meta.
+- **Hosting / Cost / SAFE_MODE:** GitHub Pages unchanged; ₹0.00 cost; SAFE_MODE unchanged.
+
+#### Option 2: GitHub Repository Dispatch / Webhook Trigger
+- **Mechanism:** Client-side JavaScript triggers a GitHub Action repository dispatch event.
+- **Components:** `.github/workflows/record_event.yml`; intermediary token-bearing proxy.
+- **New Infrastructure:** Intermediary proxy (public client cannot safely hold GitHub tokens).
+- **Security / Feasibility:** Severe risk if credentials are exposed; rate limiting by GitHub API.
+- **Evidence Type / Source Reference:** `FACT` / `github:action:run:<run_id>`.
+
+#### Option 3: Static Pre-Signed Storage URL / Asset Fetch (Cloud Storage / S3 / R2 Asset Logging)
+- **Mechanism:** CTA button or "Download Guide" fetches a dedicated asset (e.g., `solopreneur-financial-workflow-guide.pdf` or 1x1 signal asset) hosted in an object storage bucket with standard access logging enabled.
+- **Components:** Storage bucket with access logging; static guide link; local log reader script.
+- **New Infrastructure:** Cloud Storage bucket with logging enabled.
+- **Data Stored:** Standard server access log records (timestamp, object path, bytes sent, HTTP status).
+- **Evidence Type / Source Reference:** `FACT` / `gcs:access_log:bucket:object:<date_start>:<date_stop>`.
+- **Reconciliation / Meta Independence:** Fully reconcilable by ISO timestamp; operates independently of Meta.
+- **Hosting / Cost / SAFE_MODE:** GitHub Pages unchanged; ₹0.00 cost; SAFE_MODE unchanged.
+
+#### Option 4: Static Hosted Redirection Gateway
+- **Mechanism:** CTA links to an intermediate redirector route (`/access-guide`) that records an HTTP 302 redirect log before sending the browser to `guide.html`.
+- **Components:** Redirect gateway service; static landing page link; redirect log ingestor.
+- **New Infrastructure:** Hosted redirector service or CDN edge rule.
+- **Data Stored:** Redirect request log with timestamp.
+- **Evidence Type / Source Reference:** `FACT` / `gateway:redirect:access-guide:<date_start>:<date_stop>`.
+
+#### Option 5: Retaining Strictly Ad-Level Telemetry (Zero New Infrastructure)
+- **Mechanism:** Re-scope pilot success/failure criteria strictly to measurable ad-level metrics (`impressions`, link `clicks`, `cost`), accepting that on-site consumption remains a black box for this initial test.
+- **Components:** Zero new components; uses existing `MetaTelemetryIngestionService`.
+- **New Infrastructure:** None.
+- **Data Stored:** Meta campaign metrics.
+- **Evidence Type / Source Reference:** `FACT` / `meta:insights:campaign:<campaign_id>:<date_start>:<date_stop>`.
+- **Tradeoff:** Zero infrastructure overhead, but leaves on-site reading engagement unmeasured.
+
+### 4. Evidence Contract
+- **Observed Event Definition:** An immutable, timestamped record generated by a server-side access log or edge receiver confirming that a unique HTTP request was made for the target event asset within the experiment observation window.
+- **Non-Events:** Ad clicks without asset request; bot/crawler traffic; unverified estimates; local operator tests.
+- **Provenance:** Stored strictly as `EvidenceCategory.FACT` with verified `source_reference`.
+- **Remaining Uncertainty:** A server request confirms asset delivery to a client browser, but cannot prove that a human read or derived value from the content.
+
+### 5. Privacy & Data Minimization
+- Zero personal identity tracking (no names, emails, user IDs).
+- Zero IP address persistence in VentureBot SQLite database.
+- Zero fingerprinting (canvas, font, audio).
+- Zero advertising tracking pixels or retargeting cookies.
+- Strictly anonymous, aggregate event counts.
+
+### 6. Invariants Maintained
+- **Experiment Status:** Strictly `DRAFT` (no mutation).
+- **Capital Allocation:** ₹0.00 (no capital allocated).
+- **Capital Transactions:** 0 (zero ledger rows created).
+- **Capital Balance:** Starting capital ₹1,000.00, liquid balance ₹1,000.00, available unallocated capital ₹1,000.00.
+- **Actual Spend:** ₹0.00.
+- **Meta Writes:** 0 (zero write requests, zero assets created).
+- **SAFE_MODE:** `True` (enforced).
+- **Application Code Changes:** 0.
+
+### 7. Decision Boundary
+- **No Winner Selected:** Per instructions, options are documented neutrally without arbitrary scoring or ranking.
+- **Next-Step Requirement:** Requires human review of this design report to decide whether to introduce a lightweight measurement capability or re-scope the experiment to ad-level telemetry.
+
+### Final Classification
+**CONTROLLED PILOT MEASUREMENT DESIGN INSPECTION COMPLETE — NO IMPLEMENTATION PERFORMED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
 
 
 
