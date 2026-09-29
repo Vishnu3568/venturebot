@@ -36,6 +36,7 @@ class MetricsRepository:
             impressions=metrics.impressions,
             clicks=metrics.clicks,
             visitors=metrics.visitors,
+            guide_accesses=metrics.guide_accesses,
             conversions=metrics.conversions,
             conversion_rate=metrics.conversion_rate,
             revenue=metrics.revenue,
@@ -101,6 +102,7 @@ class MetricsRepository:
             impressions=orm.impressions,
             clicks=orm.clicks,
             visitors=orm.visitors,
+            guide_accesses=getattr(orm, "guide_accesses", None),
             conversions=orm.conversions,
             conversion_rate=orm.conversion_rate,
             revenue=(
