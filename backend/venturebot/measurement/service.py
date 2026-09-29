@@ -84,6 +84,7 @@ class ExperimentMeasurementService:
             impressions=metrics.impressions,
             clicks=metrics.clicks,
             visitors=metrics.visitors,
+            guide_accesses=metrics.guide_accesses,
             conversions=metrics.conversions,
             conversion_rate=computed_cr,
             revenue=metrics.revenue,
