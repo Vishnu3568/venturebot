@@ -183,6 +183,7 @@ class ExperimentMetricsORM(Base):
     impressions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     clicks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     visitors: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    guide_accesses: Mapped[int | None] = mapped_column(Integer, nullable=True)
     conversions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     conversion_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
