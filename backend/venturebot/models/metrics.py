@@ -24,6 +24,7 @@ class ExperimentMetrics(BaseModel):
     impressions: int | None = None
     clicks: int | None = None
     visitors: int | None = None
+    guide_accesses: int | None = None
     conversions: int | None = None
 
     # Computed rates — stored as recorded, no formula enforced here
