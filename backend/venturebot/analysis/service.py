@@ -26,6 +26,7 @@ TRACKABLE_METRICS: tuple[str, ...] = (
     "impressions",
     "clicks",
     "visitors",
+    "guide_accesses",
     "conversions",
     "conversion_rate",
     "revenue",
@@ -41,6 +42,7 @@ NUMERIC_COMPARE_FIELDS: tuple[str, ...] = (
     "cost",
     "profit_loss",
     "visitors",
+    "guide_accesses",
     "conversions",
     "clicks",
     "impressions",
@@ -251,6 +253,15 @@ class ExperimentAnalysisService:
                 PerformanceObservation(
                     category=EvidenceCategory.FACT,
                     statement=f"Latest recorded visitors count is {latest.visitors}.",
+                    source_reference=src_ref,
+                )
+            )
+
+        if latest.guide_accesses is not None:
+            observations.append(
+                PerformanceObservation(
+                    category=EvidenceCategory.FACT,
+                    statement=f"Latest recorded guide accesses count is {latest.guide_accesses}.",
                     source_reference=src_ref,
                 )
             )
