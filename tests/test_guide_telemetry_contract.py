@@ -75,8 +75,8 @@ def test_experiment(session: Session) -> Experiment:
             allocated_budget=Decimal("0.00"),
             max_allowed_spend=Decimal("200.00"),
             actual_spend=Decimal("0.00"),
-            success_criteria="Guide accesses >= 10",
-            failure_criteria="Guide accesses == 0",
+            success_criteria="Verified server-observed guide_accesses exist.",
+            failure_criteria="Zero guide_accesses observed during reporting window.",
             status=ExperimentStatus.DRAFT,
         )
     )

@@ -55,34 +55,32 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.39 — Guide Access Implementation Feasibility Inspection (Step 67)
+V1.41 — Pilot Approval Gate (Step 78)
 
 ---
 
 ## Current Status
 
-Step 67 — Guide Access Implementation Feasibility Inspection Complete
+Step 78 — Pilot Approval Gate Complete (No Execution)
 
-- **Step 67 Feasibility Inspection Findings:**
-  - Evaluated candidate engineering mechanisms to observe `GUIDE_ACCESS` against the live GitHub Pages `/docs` deployment and VentureBot evidence taxonomy.
-  - Option 1 (Serverless Edge Webhook): Technically viable with low overhead, but requires external cloud hosting and an unauthenticated public receiver susceptible to beacon blocking and synthetic inflation.
-  - Option 2 (GitHub Actions / Repository Dispatch): **NOT VIABLE** due to critical security risk (client-side GitHub token exposure) or requiring an intermediary proxy that collapses into Option 1 with API rate-limit bottlenecks.
-  - Option 3 (Static Object-Storage Asset Fetch with Access Logging): Architecturally viable with zero client-side JavaScript and native immutable server logs, but subject to log ingestion propagation latency (1–2 hours) and requires external cloud bucket provisioning.
-  - Option 4 (Static Hosted Redirection Gateway): Architecturally viable with zero client-side JavaScript, but introduces a single point of failure in the user funnel, external server latency, and potential ad platform redirect scrutiny.
-  - Established Epistemic Demarcation: Documented strict non-equivalences separating request received, asset served, page navigation, human viewing, reading comprehension, perceived value, conversion, and revenue.
-  - Identified Smallest Viable Implementation Shape: A zero-PII server-side access mechanism (either edge beacon receiver or storage asset fetch) isolated from client secrets.
-  - Preserved Operator Boundaries: No technology chosen, no infrastructure deployed, no code altered, no numerical thresholds invented.
-- **Explicit Safety Boundaries Maintained:**
-  - Experiment Status: Strictly `DRAFT` (No approval, no status mutation)
-  - Capital Allocation: ₹0.00 (No capital allocated, no reservation)
-  - Capital Transactions: 0 (No transactions created by Step 67)
-  - Capital Balance: Starting capital ₹1,000.00, liquid ₹1,000.00, available unallocated ₹1,000.00
-  - Actual Spend: ₹0.00
-  - Meta Writes: 0 (No live network calls, no campaigns/ad sets/ads created)
-  - Meta Spend: ₹0.00
-  - SAFE_MODE: True (Enabled by default; unconditionally blocks deployment)
-  - Live Execution: BLOCKED (Hard-blocked by Step 36 adapter guard and SAFE_MODE)
-- **Verification:** 472 tests passing, Pyright 0 errors, Pyrefly 0 errors. Zero application code changes. Capital remains ₹1,000.00 liquid, ₹0.00 spend.
+- **Step 78 Pilot Approval Result:**
+  - Transitioned the first pilot experiment (`Solopreneur Financial Workflow Guide — Problem Validation Pilot`, Experiment ID: `49fde874-9387-5056-934c-51a9cfca164f`, Opportunity ID: `63667b67-8482-519c-a498-251047e4b3ec`) from `DRAFT` to `APPROVED` using the existing `ExperimentApprovalService.approve` mechanism.
+  - Exact resulting ExperimentStatus: `ExperimentStatus.APPROVED` (`"approved"`).
+  - Linked OpportunityStatus: `OpportunityStatus.APPROVED` (`"approved"`).
+  - Approved Maximum Experiment Spend Ceiling: Preserved at ₹200.00 (`max_allowed_spend = Decimal("200.00")`).
+  - Capital Allocation: Strictly ₹0.00 (`allocated_budget = Decimal("0.00")`, `get_total_active_allocations() = ₹0.00`).
+  - Actual Experiment Spend: Strictly ₹0.00 (`actual_spend = Decimal("0.00")`).
+  - Meta Spend: ₹0.00.
+  - Decision Audit Trail: Recorded immutable `Decision` with `outcome = DecisionOutcome.APPROVE` (`"approve"`), reason: *"Human operator approval: Approved Solopreneur Financial Workflow Guide pilot at ₹200.00 maximum spend ceiling with ₹0 initial capital allocation."*
+  - Capital Transactions: 0 new transactions created (`allocation_transaction is None`).
+  - Starting Capital: ₹1,000.00.
+  - Current Liquid Balance: ₹1,000.00.
+  - Available Unallocated Capital: ₹1,000.00.
+  - Meta Writes: 0 (No live network requests, zero campaigns/ad sets/ads created).
+  - External Execution: None (`ExternalExecution` is `None`).
+  - Experiment Execution: NOT STARTED (`actual_start is None`, status is `APPROVED`, not `RUNNING`).
+  - SAFE_MODE: `True` (enforced).
+- **Verification:** 492 tests passing, Pyright 0 errors, Pyrefly 0 errors. Zero database schema changes. Capital remains ₹1,000.00 liquid, ₹0.00 spend.
 
 
 
@@ -2933,6 +2931,225 @@ The `GUIDE_ACCESS` signal confirms strictly that an **HTTP request was received 
 
 ### Final Classification
 **GUIDE_ACCESS FEASIBILITY INSPECTION COMPLETE — CANDIDATE ARCHITECTURES EVALUATED — IMPLEMENTATION NOT STARTED — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 77 — Formalize Pilot Decision Criteria
+
+### 1. Overview & Human Authorization
+Step 77 formally records the human-approved decision framework for the first pilot experiment (`Solopreneur Financial Workflow Guide — Problem Validation Pilot`).
+
+- **Experiment ID:** `49fde874-9387-5056-934c-51a9cfca164f`
+- **Opportunity ID:** `63667b67-8482-519c-a498-251047e4b3ec`
+- **Title:** `Solopreneur Financial Workflow Guide — Problem Validation Pilot`
+- **Current Status:** `DRAFT` (Strictly preserved unchanged; no approval granted)
+- **Approved Maximum Spend:** ₹200.00 (Hard ceiling)
+- **Current Capital Allocation:** ₹0.00 (`get_total_active_allocations() = ₹0.00`)
+- **Current Actual Spend:** ₹0.00
+- **Primary Objective:** Validate measurable audience interest in the financial workflow problem.
+
+---
+
+### 2. Primary Signal: `guide_accesses`
+The primary signal evaluated for this pilot is `guide_accesses`.
+
+- **Semantics:**
+  `guide_accesses` represents verified server-observed access/beacon events for the controlled guide resource (`guide.html`).
+- **Strict Epistemological Boundaries (Architecture Sections 17 & 18):**
+  `guide_accesses` MUST NOT be interpreted as:
+  - Unique visitors
+  - Unique people
+  - Human readers
+  - Guide comprehension
+  - Usefulness
+  - Conversion
+  - Customers
+  - Revenue
+  - Profit
+
+---
+
+### 3. Supporting Signals
+Evaluated from existing measurable Meta/experiment telemetry where available:
+- `impressions`
+- `link clicks`
+- `spend`
+- `CTR`
+- `CPC`
+
+Values must never be fabricated; unmeasured or unavailable signals remain unrecorded or explicitly null.
+
+---
+
+### 4. Approved Decision Outcomes
+
+The approved decision framework has three distinct outcomes:
+
+#### 1. ITERATE / SUCCESS
+- **Meaning:**
+  There is sufficient observed evidence of audience interest to justify designing a subsequent experiment or iteration.
+- **Requirements:**
+  1. Verified `guide_accesses` exist.
+  2. Meta link clicks and guide accesses are evaluated within the same appropriate reporting window.
+  3. The observed funnel provides meaningful evidence of interest.
+  4. Spend remains within the approved ₹200.00 maximum budget ceiling.
+  5. Telemetry integrity is valid.
+  6. No unsupported claims are made.
+- **Strict Invariant:**
+  Do NOT invent a numeric guide_access threshold such as 10, 15, 20, etc.
+
+#### 2. KILL / FAILURE
+- **Meaning:**
+  Evidence is sufficiently weak that the current hypothesis/channel combination should not receive further capital without a materially changed hypothesis.
+- **Requirements:**
+  1. Sufficient traffic/observation has occurred OR the approved budget has been substantially/fully consumed.
+  2. Guide-access activity remains negligible relative to the observed Meta traffic.
+  3. Telemetry integrity is valid.
+  4. No telemetry failure explains the weak result.
+- **Strict Invariant:**
+  Do NOT invent a numeric threshold for "negligible".
+
+#### 3. HOLD / INCONCLUSIVE
+- **Meaning:**
+  There is insufficient or ambiguous evidence to confidently classify the experiment as successful or failed.
+- **Examples:**
+  - Insufficient observation
+  - Insufficient traffic
+  - Telemetry interruption
+  - Conflicting signals
+  - Unresolved measurement uncertainty
+- **Strict Invariant:**
+  HOLD must NOT automatically trigger more spending or capital allocation.
+
+---
+
+### 5. Critical Decision Rules
+1. Do not create arbitrary scoring formulas.
+2. Do not create arbitrary weights.
+3. Do not create arbitrary success/failure percentages.
+4. Do not automatically convert observed metrics into SCALE/ITERATE/KILL/HOLD.
+5. Do not automatically allocate additional capital.
+6. Do not automatically extend the experiment.
+7. Do not claim profitability.
+8. Do not claim customer validation.
+9. Do not claim unique-user behavior from guide_accesses.
+10. Preserve FACT vs INFERENCE vs HYPOTHESIS vs PREDICTION semantics.
+11. Preserve existing reporting-window and restatement semantics.
+12. Preserve the existing financial ledger as authoritative.
+13. Revenue and profit remain unevaluated for this pilot because the current pilot is non-monetized.
+
+---
+
+### 6. Smallest Implementation Mechanism & Model Inspection
+- **Inspection Findings:**
+  The existing `Experiment` (Pydantic) and `ExperimentORM` (SQLAlchemy) data models already possess first-class text fields:
+  - `objective: str` (Text)
+  - `success_criteria: str` (Text)
+  - `failure_criteria: str` (Text)
+  These fields natively represent the approved natural-language decision criteria without requiring any database schema migrations, new columns, or generic rules engines.
+- **Repository Support:**
+  Added `ExperimentRepository.update_decision_criteria(experiment_id, success_criteria, failure_criteria, objective=None)` to update criteria idempotently on existing experiments without side-effects.
+- **Persistence Synchronization:**
+  Updated `tests/test_pilot_persistence.py` (`build_candidate_experiment` and `persist_draft_pilot`) to persist and idempotently update the pilot experiment with the canonical approved Step 77 decision criteria.
+
+---
+
+### 7. Safety Invariants & Final Classification
+- **Capital State:** Starting capital ₹1,000.00, liquid ₹1,000.00, active allocations ₹0.00, available unallocated capital ₹1,000.00, actual spend ₹0.00, capital transactions = 0.
+- **Meta State:** 0 live write requests, 0 campaigns/ad sets/ads created, 0 external executions, ₹0.00 Meta spend.
+- **SAFE_MODE:** `True` (enforced).
+- **Experiment Status:** Strictly `DRAFT` (no approval, no mutation).
+- **Automated Decision / Execution:** None (0 `DecisionORM` rows created, no automated execution).
+- **Verification Evidence:** 488 tests passed (`pytest tests/`), Pyright 0 errors, Pyrefly 0 errors.
+
+### Final Classification
+**PILOT DECISION CRITERIA FORMALIZED — NO ARBITRARY THRESHOLDS — ZERO SCHEMA MIGRATIONS — EXPERIMENT STILL DRAFT — NO CAPITAL ALLOCATION — NO META EXECUTION**
+
+---
+
+## Step 78 — Pilot Approval Gate (No Execution)
+
+### 1. Overview & Human Authorization
+Step 78 formally executed the human-approved pilot approval gate for the first pilot experiment (`Solopreneur Financial Workflow Guide — Problem Validation Pilot`).
+
+- **Human Authorization Scope:**
+  - Operator explicitly authorized proceeding to the pilot approval gate.
+  - Authorized formally marking the pilot `APPROVED` using the existing lifecycle and approval mechanism.
+  - Authorized preserving the ₹200.00 maximum experiment ceiling.
+  - Explicitly did NOT authorize immediate spending.
+  - Explicitly did NOT authorize Meta execution.
+  - Explicitly did NOT authorize automatic capital allocation.
+  - Explicitly did NOT authorize changing `SAFE_MODE`.
+  - Explicitly did NOT authorize starting the experiment.
+
+---
+
+### 2. Approval Mechanism & State Transition
+- **Existing Mechanism Found:**
+  The canonical `ExperimentApprovalService.approve` in `backend/venturebot/approval/service.py` governs the transition of experiments from `DRAFT` to `APPROVED`.
+- **State Transition Performed:**
+  - Experiment ID: `49fde874-9387-5056-934c-51a9cfca164f`
+  - Opportunity ID: `63667b67-8482-519c-a498-251047e4b3ec`
+  - Prior Experiment Status: `ExperimentStatus.DRAFT` (`"draft"`)
+  - Resulting Experiment Status: `ExperimentStatus.APPROVED` (`"approved"`)
+  - Prior Opportunity Status: `OpportunityStatus.DISCOVERED` (`"discovered"`)
+  - Resulting Opportunity Status: `OpportunityStatus.APPROVED` (`"approved"`)
+  - Approved Maximum Spend Ceiling: Preserved at ₹200.00 (`max_allowed_spend = Decimal("200.00")`)
+  - Capital Allocation: Strictly ₹0.00 (`allocated_budget = Decimal("0.00")`)
+  - Actual Experiment Spend: Strictly ₹0.00 (`actual_spend = Decimal("0.00")`)
+  - Meta Spend: Strictly ₹0.00
+- **Decision Audit Trail:**
+  Recorded immutable `Decision` record:
+  - `outcome`: `DecisionOutcome.APPROVE` (`"approve"`)
+  - `reason`: *"Human operator approval: Approved Solopreneur Financial Workflow Guide pilot at ₹200.00 maximum spend ceiling with ₹0 initial capital allocation."*
+  - `evidence_summary`: *"Allocated budget: ₹0.00, Max spend ceiling: ₹200.00"*
+  - `experiment_id`: `49fde874-9387-5056-934c-51a9cfca164f`
+  - `opportunity_id`: `63667b67-8482-519c-a498-251047e4b3ec`
+- **Criteria Preservation:**
+  All Step 77 human-approved decision criteria, primary signal boundaries, and supporting signal definitions were preserved 100% intact:
+  - `objective`: *"Validate measurable audience interest in the financial workflow problem."*
+  - `success_criteria`: Preserved verbatim (incorporating `ITERATE / SUCCESS`, verified server-observed `guide_accesses`, reporting window alignment, ₹200.00 ceiling, and prohibition on arbitrary numeric thresholds).
+  - `failure_criteria`: Preserved verbatim (incorporating `KILL / FAILURE`, `HOLD / INCONCLUSIVE`, and strict prohibition on automatic spending).
+
+---
+
+### 3. Critical Financial Safety Verification
+- **Starting Capital:** ₹1,000.00 (unchanged)
+- **Current Liquid Balance:** ₹1,000.00 (unchanged)
+- **Committed Active Allocations:** ₹0.00 (`get_total_active_allocations() = ₹0.00`)
+- **Available Unallocated Capital:** ₹1,000.00 (`get_available_unallocated_capital() = ₹1,000.00`)
+- **Actual Experiment Spend:** ₹0.00
+- **Meta Spend:** ₹0.00
+- **Capital Ledger Transactions:** 1 (initial seed deposit; ZERO new transactions created; `allocation_transaction is None`)
+- **Funding / Payment Actions:** 0
+
+---
+
+### 4. Critical Execution Safety Verification
+- **Meta Campaigns Created:** 0
+- **Meta Ad Sets Created:** 0
+- **Meta Ads Created:** 0
+- **Meta Creatives Created:** 0
+- **Meta API Write Calls:** 0
+- **ExternalExecution Records:** None (`ExternalExecutionRepository.get_by_experiment_id() is None`)
+- **SAFE_MODE:** `True` (active and enforced)
+- **Experiment Execution:** NOT STARTED (`actual_start is None`, status is `APPROVED`, not `RUNNING`)
+- **Automated Dispatches:** None
+
+---
+
+### 5. Verification Evidence
+- Full test suite: 492 passed (`pytest tests/`).
+- Targeted tests in `tests/test_pilot_persistence.py`:
+  - `test_step78_pilot_approval_gate` (verifies transition to APPROVED, ₹200 ceiling, ₹0 allocation, decision audit).
+  - `test_step78_pilot_approval_financial_invariants` (verifies balance ₹1,000, allocations ₹0, 0 transactions).
+  - `test_step78_pilot_approval_execution_safety` (verifies 0 external executions, SAFE_MODE=True, not started).
+  - `test_step78_pilot_approval_idempotency` (verifies idempotency of approval calls and database counts).
+- Type checking: Pyright 0 errors (`npx pyright backend tests`).
+- Static analysis: Pyrefly 0 errors (`uvx pyrefly check backend tests`).
+
+### Final Classification
+**PILOT APPROVAL GATE COMPLETE — STATUS APPROVED — MAXIMUM CEILING ₹200 PRESERVED — ZERO CAPITAL ALLOCATED — ZERO MONEY SPENT — NO META WRITES — SAFE_MODE ACTIVE**
 
 
 

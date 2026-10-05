@@ -136,6 +136,31 @@ class ExperimentRepository:
         actual_spend = self.get_actual_spend_from_ledger(experiment_id)
         return self._to_pydantic(orm, actual_spend=actual_spend)
 
+    def update_decision_criteria(
+        self,
+        experiment_id: UUID,
+        success_criteria: str,
+        failure_criteria: str,
+        objective: str | None = None,
+    ) -> Experiment | None:
+        """Update the formal decision criteria and optional objective of an existing Experiment."""
+        orm = self.session.get(ExperimentORM, experiment_id)
+        if orm is None:
+            return None
+
+        orm.success_criteria = success_criteria
+        orm.failure_criteria = failure_criteria
+        if objective is not None:
+            orm.objective = objective
+
+        if self.auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+
+        actual_spend = self.get_actual_spend_from_ledger(experiment_id)
+        return self._to_pydantic(orm, actual_spend=actual_spend)
+
     @staticmethod
     def _to_pydantic(orm: ExperimentORM, actual_spend: Decimal | None = None) -> Experiment:
         """Map ExperimentORM to canonical Pydantic model."""
