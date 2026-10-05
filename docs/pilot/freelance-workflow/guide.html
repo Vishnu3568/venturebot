@@ -526,5 +526,22 @@ Best regards,
       <p style="margin-top:10px">VentureBot Problem Validation Pilot · Experiment ID: <code>49fde874-9387-5056-934c-51a9cfca164f</code> · Capital committed: ₹0.00 · SAFE_MODE: Active.</p>
     </footer>
   </div>
+
+  <script>
+    (function() {
+      try {
+        var payload = JSON.stringify({
+          experiment_id: "49fde874-9387-5056-934c-51a9cfca164f",
+          event_type: "guide_access"
+        });
+        var url = "https://venturebot-telemetry.uvishnu3568.workers.dev/event/guide_access";
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url, new Blob([payload], { type: "application/json" }));
+        } else if (window.fetch) {
+          fetch(url, { method: "POST", body: payload, headers: { "Content-Type": "application/json" }, keepalive: true }).catch(function() {});
+        }
+      } catch (e) {}
+    })();
+  </script>
 </body>
 </html>

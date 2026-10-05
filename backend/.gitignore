@@ -1,0 +1,49 @@
+# Bytecode and build caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging and distribution
+build/
+dist/
+eggs/
+*.egg
+*.egg-info/
+var/
+parts/
+wheels/
+sdist/
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Databases / local storage
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Test and lint caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pyright/
+
+# Local environment and secrets
+.env
+.env.*
+*.env
+
+# Logs
+*.log
+logs/

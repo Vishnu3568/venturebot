@@ -1,0 +1,8 @@
+name = "venturebot-telemetry"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "venturebot-telemetry-d1"
+database_id = "74342fe4-4fe5-4b01-aab6-be67f45bed7f"

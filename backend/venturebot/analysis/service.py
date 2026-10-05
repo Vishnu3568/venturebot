@@ -60,8 +60,13 @@ def _normalize_dt(dt: datetime) -> datetime:
 
 
 def _parse_window_dates(source_ref: str) -> tuple[datetime, datetime] | None:
-    """Parse start and stop datetimes from a canonical Meta campaign reporting-window string."""
-    if not source_ref or not source_ref.startswith("meta:insights:campaign:"):
+    """Parse start and stop datetimes from a canonical reporting-window string (Meta or Edge telemetry)."""
+    if not source_ref:
+        return None
+    if not (
+        source_ref.startswith("meta:insights:campaign:")
+        or source_ref.startswith("edge:telemetry:guide_access:")
+    ):
         return None
     parts = source_ref.split(":")
     if len(parts) >= 6:
@@ -223,13 +228,14 @@ class ExperimentAnalysisService:
                     source_reference=src_ref,
                 )
             )
-        observations.append(
-            PerformanceObservation(
-                category=EvidenceCategory.FACT,
-                statement=f"Latest recorded cost is ₹{latest.cost:.2f}.",
-                source_reference=src_ref,
+        if latest.cost is not None:
+            observations.append(
+                PerformanceObservation(
+                    category=EvidenceCategory.FACT,
+                    statement=f"Latest recorded cost is ₹{latest.cost:.2f}.",
+                    source_reference=src_ref,
+                )
             )
-        )
         if latest.profit_loss is not None:
             observations.append(
                 PerformanceObservation(

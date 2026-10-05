@@ -31,6 +31,18 @@ venv.bak/
 # Distribution / packaging
 .Python
 
+# SQLite / Databases / Local State
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Cloudflare Workers / Wrangler / Edge Telemetry
+.wrangler/
+.dev.vars*
+
 # Unit test / coverage
 htmlcov/
 .tox/
@@ -45,11 +57,13 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
-# Type checkers
+# Type checkers, linters, and formatters
 .mypy_cache/
 .dmypy.json
 dmypy.json
 .pytype/
+.ruff_cache/
+.pyright/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -61,32 +75,57 @@ ipython_config.py
 # pyenv
 .python-version
 
-# Environments / secrets
+# Environments, secrets, and credentials
 .env
 .env.local
 .env.development
 .env.production
 *.env
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
 
-# Node / React / frontend
+# Node / React / Frontend
 node_modules/
 frontend/node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 .pnp
 .pnp.js
 frontend/.next/
 frontend/out/
 frontend/build/
 frontend/dist/
+frontend/dist-ssr/
+dist-ssr/
+frontend/.vite/
+.vite/
+frontend/.turbo/
+.turbo/
 .eslintcache
 
 # OS
 .DS_Store
 Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+._*
+.Spotlight-V100
+.Trashes
 *.swp
+*.swo
 *~
+*.bak
+*.tmp
+*.patch
 
 # IDEs
 .vscode/

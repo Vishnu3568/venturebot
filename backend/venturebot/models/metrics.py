@@ -34,7 +34,7 @@ class ExperimentMetrics(BaseModel):
 
     # Money — Decimal to avoid float rounding on financial values
     revenue: Decimal | None = Field(default=None, ge=Decimal("0"))
-    cost: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    cost: Decimal | None = Field(default=None, ge=Decimal("0"))
 
     # profit_loss is signed: positive = profit, negative = loss
     profit_loss: Decimal | None = Field(default=None)
@@ -51,7 +51,7 @@ class ExperimentMetrics(BaseModel):
     @model_validator(mode="after")
     def profit_loss_consistent(self) -> "ExperimentMetrics":
         """Warn via ValueError if profit_loss contradicts revenue - cost when both are known."""
-        if self.revenue is not None and self.profit_loss is not None:
+        if self.revenue is not None and self.cost is not None and self.profit_loss is not None:
             expected = self.revenue - self.cost
             if self.profit_loss != Decimal("0") and self.profit_loss != expected:
                 # Allow caller to set it explicitly (e.g. when fees or adjustments apply),

@@ -112,8 +112,8 @@ class MetricsRepository:
             ),
             cost=(
                 orm.cost
-                if isinstance(orm.cost, Decimal)
-                else Decimal(str(orm.cost or 0))
+                if orm.cost is None or isinstance(orm.cost, Decimal)
+                else Decimal(str(orm.cost))
             ),
             profit_loss=(
                 orm.profit_loss

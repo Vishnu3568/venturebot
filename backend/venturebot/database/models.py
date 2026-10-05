@@ -190,8 +190,8 @@ class ExperimentMetricsORM(Base):
     revenue: Mapped[Decimal | None] = mapped_column(
         Numeric(precision=12, scale=2, asdecimal=True), nullable=True, default=None
     )
-    cost: Mapped[Decimal] = mapped_column(
-        Numeric(precision=12, scale=2, asdecimal=True), default=Decimal("0.00")
+    cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=12, scale=2, asdecimal=True), nullable=True, default=None
     )
     profit_loss: Mapped[Decimal | None] = mapped_column(
         Numeric(precision=12, scale=2, asdecimal=True), nullable=True, default=None

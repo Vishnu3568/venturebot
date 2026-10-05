@@ -64,12 +64,18 @@ class ExperimentMeasurementService:
 
         # Deterministic ROI / ROAS if cost > 0, values are None, and financial inputs are known
         computed_roi = metrics.roi
-        if computed_roi is None and metrics.cost > Decimal("0") and updated_profit_loss is not None:
+        if (
+            computed_roi is None
+            and metrics.cost is not None
+            and metrics.cost > Decimal("0")
+            and updated_profit_loss is not None
+        ):
             computed_roi = round(float(updated_profit_loss / metrics.cost), 4)
 
         computed_roas = metrics.roas
         if (
             computed_roas is None
+            and metrics.cost is not None
             and metrics.cost > Decimal("0")
             and metrics.revenue is not None
             and metrics.revenue > Decimal("0")
