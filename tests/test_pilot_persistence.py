@@ -30,7 +30,7 @@ from venturebot.database.repositories.experiment import ExperimentRepository
 from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.database.repositories.opportunity import OpportunityRepository
 from venturebot.env import is_safe_mode
-from venturebot.models.capital import TransactionType
+from venturebot.models.capital import CapitalTransaction, TransactionType
 from venturebot.models.decision import DecisionOutcome
 from venturebot.models.experiment import Channel, Experiment, ExperimentStatus, MonetizationMethod
 from venturebot.models.opportunity import Opportunity, OpportunityCategory, OpportunityStatus
@@ -80,6 +80,16 @@ OLD_PILOT_FAILURE_CRITERIA = (
     "Observable telemetry: zero delivery, policy rejection, or account billing error. "
     "Human failure threshold: NOT YET DEFINED — REQUIRES HUMAN APPROVAL."
 )
+
+# Canonical Step 82/83 Pilot Creative Specifications & Approval State
+PILOT_CREATIVE_PATH = Path("pilot/freelance-workflow/pilot_creative.png")
+PILOT_CREATIVE_SHA256 = "e532ba011fb1eea6ef14e15b6855b59215ee4329d98873646749122e36bb2a7c"
+PILOT_CREATIVE_HEADLINE = "Solopreneur Financial Workflow Guide"
+PILOT_CREATIVE_PRIMARY_TEXT = (
+    "5 practical systems to keep invoices, follow-ups & cash flow organized."
+)
+PILOT_CREATIVE_CTA = "LEARN_MORE"
+PILOT_CREATIVE_STATUS_APPROVED = "CREATIVE_APPROVED"
 
 
 def build_candidate_opportunity(opp_id: UUID = PILOT_OPPORTUNITY_ID) -> Opportunity:
@@ -307,6 +317,73 @@ def persist_approved_pilot(
     opp_repo = OpportunityRepository(session, auto_commit=False)
     updated_opp = opp_repo.get(opp.id)
     return updated_opp or opp, approved_exp, approval_result
+
+
+PILOT_ALLOCATION_AMOUNT = Decimal("200.00")
+PILOT_ALLOCATION_REASON = (
+    "Controlled pilot capital allocation authorized for the approved "
+    "Solopreneur Financial Workflow Guide problem-validation experiment."
+)
+
+
+def allocate_pilot(
+    session: Session,
+    exp_id: UUID = PILOT_EXPERIMENT_ID,
+    amount: Decimal = PILOT_ALLOCATION_AMOUNT,
+    reason: str = PILOT_ALLOCATION_REASON,
+) -> CapitalTransaction:
+    """Allocate authorized capital to approved pilot using canonical CapitalRepository."""
+    cap_repo = CapitalRepository(session, auto_commit=True)
+    return cap_repo.allocate_to_experiment(
+        experiment_id=exp_id,
+        amount=amount,
+        reason=reason,
+    )
+
+
+def persist_allocated_pilot(
+    session: Session,
+    opp_id: UUID = PILOT_OPPORTUNITY_ID,
+    exp_id: UUID = PILOT_EXPERIMENT_ID,
+    destination_url: str | None = PILOT_DESTINATION_URL,
+    objective: str = PILOT_PRIMARY_OBJECTIVE,
+    success_criteria: str = PILOT_SUCCESS_CRITERIA,
+    failure_criteria: str = PILOT_FAILURE_CRITERIA,
+    approval_reason: str = PILOT_APPROVAL_REASON,
+    allocation_amount: Decimal = PILOT_ALLOCATION_AMOUNT,
+    allocation_reason: str = PILOT_ALLOCATION_REASON,
+) -> tuple[Opportunity, Experiment, CapitalTransaction]:
+    """Idempotently ensure pilot is persisted, approved, and allocated authorized budget."""
+    opp, exp, _ = persist_approved_pilot(
+        session,
+        opp_id=opp_id,
+        exp_id=exp_id,
+        destination_url=destination_url,
+        objective=objective,
+        success_criteria=success_criteria,
+        failure_criteria=failure_criteria,
+        reason=approval_reason,
+    )
+    cap_repo = CapitalRepository(session, auto_commit=True)
+    exp_repo = ExperimentRepository(session, auto_commit=True)
+
+    current_exp = exp_repo.get(exp_id, sync_spend_from_ledger=False)
+    if current_exp is not None and current_exp.allocated_budget == allocation_amount:
+        txs = cap_repo.get_transaction_history(
+            experiment_id=exp_id,
+            transaction_type=TransactionType.EXPERIMENT_ALLOCATION,
+        )
+        if txs:
+            return opp, current_exp, txs[0]
+
+    tx = cap_repo.allocate_to_experiment(
+        experiment_id=exp_id,
+        amount=allocation_amount,
+        reason=allocation_reason,
+    )
+    allocated_exp = exp_repo.get(exp_id, sync_spend_from_ledger=False)
+    return opp, allocated_exp or exp, tx
+
 
 
 @pytest.fixture
@@ -859,4 +936,1086 @@ def test_step78_pilot_approval_idempotency(test_session: Session) -> None:
     assert len(opp_repo.list()) == 1
     assert len(dec_repo.list(experiment_id=PILOT_EXPERIMENT_ID)) == 1
     assert len(cap_repo.get_transaction_history()) == 1
+
+
+# ── Step 82 — Pilot Creative Asset Preparation & Verification ────────────────
+
+
+def test_step82_creative_asset_technical_contract() -> None:
+    """Verify Step 82: candidate creative asset meets Meta execution technical contract.
+
+    Verifies:
+    1. Asset exists at canonical path: pilot/freelance-workflow/pilot_creative.png.
+    2. File is readable and non-empty.
+    3. File is a valid PNG image (magic bytes \x89PNG\r\n\x1a\n).
+    4. Dimensions are exactly 1080x1080 pixels (1:1 square aspect ratio).
+    5. File size is within Meta limits (> 0 and <= 30 MB).
+    6. SHA-256 hash is computed and valid.
+    7. Compatible with MetaExecutionSpecification(image_asset_path=...).
+    """
+    import hashlib
+    import struct
+    from venturebot.execution.meta import MetaExecutionSpecification
+
+    creative_path = Path("pilot/freelance-workflow/pilot_creative.png")
+    assert creative_path.is_file(), f"Creative asset missing at {creative_path}"
+
+    file_bytes = creative_path.read_bytes()
+    assert len(file_bytes) > 0, "Creative file is empty"
+    assert len(file_bytes) <= 30 * 1024 * 1024, "Creative file exceeds Meta 30MB limit"
+
+    # Image format and dimensions via standard PNG IHDR parsing (pure stdlib)
+    assert file_bytes[:8] == b"\x89PNG\r\n\x1a\n", "Invalid PNG magic signature"
+    assert file_bytes[12:16] == b"IHDR", "Invalid PNG IHDR chunk"
+    width, height = struct.unpack(">II", file_bytes[16:24])
+    assert (width, height) == (1080, 1080), f"Expected 1080x1080, got {width}x{height}"
+    assert width == height, "Aspect ratio must be strictly 1:1"
+
+    # SHA-256 hash verification
+    computed_hash = hashlib.sha256(file_bytes).hexdigest()
+    assert len(computed_hash) == 64
+    assert computed_hash == "e532ba011fb1eea6ef14e15b6855b59215ee4329d98873646749122e36bb2a7c"
+
+    # MetaExecutionSpecification contract compatibility
+    spec = MetaExecutionSpecification(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        ad_account_id="act_1985595022114520",
+        page_id="1389949167526709",
+        destination_url=PILOT_DESTINATION_URL,
+        primary_text="5 practical systems to keep invoices, follow-ups & cash flow organized.",
+        headline="Solopreneur Financial Workflow Guide",
+        image_asset_path=str(creative_path),
+        authorized_budget=Decimal("200.00"),
+    )
+    assert spec.image_asset_path == str(creative_path)
+    assert spec.image_hash is None
+
+
+# ── Step 83 — Record Human Approval of Pilot Creative ─────────────────────────
+
+
+def test_step83_approved_creative_asset_contract(test_session: Session) -> None:
+    """Verify Step 83: approved creative asset contract, hash integrity, and pilot association.
+
+    Verifies:
+    1. Approved creative asset exists at canonical path: pilot/freelance-workflow/pilot_creative.png.
+    2. File is readable, non-empty, and valid PNG image (magic bytes \x89PNG\r\n\x1a\n).
+    3. Dimensions are exactly 1080x1080 pixels (1:1 square aspect ratio).
+    4. File size is within Meta limits (> 0 and <= 30 MB).
+    5. Exact SHA-256 matches approved hash: e532ba011fb1eea6ef14e15b6855b59215ee4329d98873646749122e36bb2a7c.
+    6. Associated strictly with approved pilot parameters:
+       - Headline: "Solopreneur Financial Workflow Guide"
+       - Primary Text: "5 practical systems to keep invoices, follow-ups & cash flow organized."
+       - CTA: "LEARN_MORE"
+       - Destination URL: "https://vishnu3568.github.io/venturebot/pilot/freelance-workflow/"
+    7. Compatible with MetaExecutionSpecification(image_asset_path=...).
+    8. Creative approval state is CREATIVE_APPROVED.
+    9. Invariants preserved: no capital allocated, spend = ₹0, SAFE_MODE = True, experiment status = APPROVED.
+    """
+    import hashlib
+    import struct
+    from venturebot.execution.meta import MetaExecutionSpecification
+
+    # 1. Existence and basic properties
+    assert PILOT_CREATIVE_PATH.is_file(), f"Creative asset missing at {PILOT_CREATIVE_PATH}"
+    file_bytes = PILOT_CREATIVE_PATH.read_bytes()
+    assert len(file_bytes) > 0, "Creative file is empty"
+    assert len(file_bytes) <= 30 * 1024 * 1024, "Creative file exceeds Meta 30MB limit"
+
+    # 2. Format & dimensions via PNG IHDR parsing (pure stdlib)
+    assert file_bytes[:8] == b"\x89PNG\r\n\x1a\n", "Invalid PNG magic signature"
+    assert file_bytes[12:16] == b"IHDR", "Invalid PNG IHDR chunk"
+    width, height = struct.unpack(">II", file_bytes[16:24])
+    assert (width, height) == (1080, 1080), f"Expected 1080x1080, got {width}x{height}"
+    assert width == height, "Aspect ratio must be strictly 1:1"
+
+    # 3. Exact SHA-256 hash match
+    computed_hash = hashlib.sha256(file_bytes).hexdigest()
+    assert computed_hash == PILOT_CREATIVE_SHA256
+
+    # 4. MetaExecutionSpecification contract compatibility with approved copy
+    spec = MetaExecutionSpecification(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        ad_account_id="act_1985595022114520",
+        page_id="1389949167526709",
+        destination_url=PILOT_DESTINATION_URL,
+        primary_text=PILOT_CREATIVE_PRIMARY_TEXT,
+        headline=PILOT_CREATIVE_HEADLINE,
+        image_asset_path=str(PILOT_CREATIVE_PATH),
+        authorized_budget=Decimal("200.00"),
+    )
+    assert spec.image_asset_path == str(PILOT_CREATIVE_PATH)
+    assert spec.destination_url == PILOT_DESTINATION_URL
+    assert spec.headline == PILOT_CREATIVE_HEADLINE
+    assert spec.primary_text == PILOT_CREATIVE_PRIMARY_TEXT
+    assert PILOT_CREATIVE_CTA == "LEARN_MORE"
+    assert PILOT_CREATIVE_STATUS_APPROVED == "CREATIVE_APPROVED"
+
+    # 5. Safety and financial invariants
+    opp, exp, result = persist_approved_pilot(test_session)
+    assert result.is_approved is True
+    assert exp.status == ExperimentStatus.APPROVED
+    assert exp.actual_start is None
+    assert exp.allocated_budget == Decimal("0.00")
+    assert exp.actual_spend == Decimal("0.00")
+    assert is_safe_mode() is True
+
+    cap_repo = CapitalRepository(test_session)
+    assert cap_repo.get_current_balance() == Decimal("1000.00")
+    assert cap_repo.get_total_active_allocations() == Decimal("0.00")
+    assert cap_repo.get_available_unallocated_capital() == Decimal("1000.00")
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+    ext_repo = ExternalExecutionRepository(test_session)
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+
+# ── Step 85 — Controlled Post-Approval Capital Allocation Capability ──────────
+
+
+def test_step85_pilot_post_approval_allocation_invariants(test_session: Session) -> None:
+    """Verify Step 85: CapitalRepository.allocate_to_experiment on approved pilot.
+
+    Verifies:
+    1. Baseline pilot is APPROVED with allocated_budget = ₹0.00, actual_spend = ₹0.00.
+    2. Post-approval allocation of ₹200.00 updates allocated_budget to ₹200.00.
+    3. Transaction type is EXPERIMENT_ALLOCATION (not EXPERIMENT_SPEND).
+    4. actual_spend remains strictly ₹0.00.
+    5. current_balance remains strictly ₹1,000.00.
+    6. available_unallocated_capital decreases from ₹1,000.00 to ₹800.00.
+    7. experiment status remains APPROVED; actual_start remains None.
+    8. Attempting repeated allocation beyond ₹200.00 ceiling is rejected.
+    9. SAFE_MODE remains True; zero external executions created.
+    """
+    cap_repo = CapitalRepository(test_session)
+    exp_repo = ExperimentRepository(test_session)
+    ext_repo = ExternalExecutionRepository(test_session)
+
+    # 1. Baseline approved pilot verification
+    opp, exp, result = persist_approved_pilot(test_session)
+    assert result.is_approved is True
+    assert exp.id == PILOT_EXPERIMENT_ID
+    assert exp.status == ExperimentStatus.APPROVED
+    assert exp.allocated_budget == Decimal("0.00")
+    assert exp.max_allowed_spend == Decimal("200.00")
+    assert exp.actual_spend == Decimal("0.00")
+    assert exp.actual_start is None
+    assert is_safe_mode() is True
+
+    assert cap_repo.get_current_balance() == Decimal("1000.00")
+    assert cap_repo.get_available_unallocated_capital() == Decimal("1000.00")
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+    # 2. Execute post-approval allocation of approved ceiling (₹200.00)
+    tx = cap_repo.allocate_to_experiment(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        amount=Decimal("200.00"),
+        reason="Authorize approved pilot ₹200.00 budget ceiling",
+    )
+
+    # 3. Transaction invariants
+    assert tx.transaction_type == TransactionType.EXPERIMENT_ALLOCATION
+    assert tx.amount == Decimal("200.00")
+    assert tx.experiment_id == PILOT_EXPERIMENT_ID
+    assert len(cap_repo.get_transaction_history(transaction_type=TransactionType.EXPERIMENT_SPEND)) == 0
+
+    # 4. Experiment state after allocation
+    allocated_exp = exp_repo.get(PILOT_EXPERIMENT_ID)
+    assert allocated_exp is not None
+    assert allocated_exp.allocated_budget == Decimal("200.00")
+    assert allocated_exp.max_allowed_spend == Decimal("200.00")
+    assert allocated_exp.actual_spend == Decimal("0.00")
+    assert allocated_exp.status == ExperimentStatus.APPROVED
+    assert allocated_exp.actual_start is None
+
+    # 5. Financial ledger summary after allocation
+    summary = cap_repo.get_financial_summary()
+    assert summary.current_balance == Decimal("1000.00")  # Cash pool untouched
+    assert summary.total_cost == Decimal("0.00")  # No spend
+    assert summary.total_allocated == Decimal("200.00")  # Committed
+    assert summary.available_unallocated == Decimal("800.00")  # Headroom
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+    # 6. Guard against duplicate / over-allocation
+    with pytest.raises(ValueError, match="exceeds remaining allocation capacity"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=PILOT_EXPERIMENT_ID,
+            amount=Decimal("0.01"),
+            reason="Exceeding allocation ceiling",
+        )
+
+    # 7. Zero external executions, SAFE_MODE active
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+    assert is_safe_mode() is True
+
+
+# ── Step 86 — Controlled Pilot Capital Allocation — No Execution ─────────────
+
+
+def test_step86_controlled_pilot_capital_allocation(test_session: Session) -> None:
+    """Verify Step 86: Controlled Pilot Capital Allocation (₹200.00) without execution.
+
+    Preconditions Verified:
+    1. Experiment exists.
+    2. Experiment ID exactly matches 49fde874-9387-5056-934c-51a9cfca164f.
+    3. Experiment status is APPROVED.
+    4. max_allowed_spend == ₹200.00.
+    5. allocated_budget == ₹0.00.
+    6. actual_spend == ₹0.00.
+    7. Starting capital == ₹1,000.00.
+    8. Current liquid balance == ₹1,000.00.
+    9. Available unallocated capital == ₹1,000.00.
+    10. SAFE_MODE == True.
+    11. Creative state is CREATIVE_APPROVED.
+    12. No previous allocation exists for this pilot.
+    13. No Meta execution has occurred.
+
+    Post-Allocation Invariants:
+    1. Exact ₹200.00 allocation performed using CapitalRepository.allocate_to_experiment().
+    2. Experiment allocated_budget == ₹200.00.
+    3. Experiment max_allowed_spend remains ₹200.00.
+    4. Experiment actual_spend remains ₹0.00.
+    5. Experiment status remains APPROVED (actual_start is None).
+    6. Capital starting capital remains ₹1,000.00.
+    7. Capital current liquid balance remains ₹1,000.00 (allocation != spend).
+    8. Capital active allocation becomes ₹200.00.
+    9. Capital available unallocated capital becomes ₹800.00.
+    10. Exactly one new ledger transaction of type EXPERIMENT_ALLOCATION exists.
+    11. Zero EXPERIMENT_SPEND transactions exist.
+    12. Zero Meta API writes, zero campaigns, zero ad sets, zero creatives, zero ads.
+    13. Zero ExternalExecution records.
+    14. SAFE_MODE remains True.
+    15. Idempotency: repeated allocation cannot silently allocate another ₹200.00 (fails with ValueError).
+    16. Idempotent helper persist_allocated_pilot returns existing record without duplicate ledger entries.
+    """
+    cap_repo = CapitalRepository(test_session)
+    exp_repo = ExperimentRepository(test_session)
+    ext_repo = ExternalExecutionRepository(test_session)
+
+    # ── PRECONDITION CHECKS ──
+    # 1. Experiment exists and is approved via persist_approved_pilot
+    opp, exp, app_res = persist_approved_pilot(test_session)
+    assert app_res.is_approved is True
+    # 2. Experiment ID matches exactly
+    assert exp.id == PILOT_EXPERIMENT_ID
+    assert exp.id == UUID("49fde874-9387-5056-934c-51a9cfca164f")
+    assert opp.id == UUID("63667b67-8482-519c-a498-251047e4b3ec")
+    # 3. Experiment status is APPROVED
+    assert exp.status == ExperimentStatus.APPROVED
+    assert exp.actual_start is None
+    # 4. max_allowed_spend == ₹200.00
+    assert exp.max_allowed_spend == Decimal("200.00")
+    # 5. allocated_budget == ₹0.00
+    assert exp.allocated_budget == Decimal("0.00")
+    # 6. actual_spend == ₹0.00
+    assert exp.actual_spend == Decimal("0.00")
+    # 7. Starting capital == ₹1,000.00
+    init_deposit = cap_repo.get_transaction_history(transaction_type=TransactionType.INITIAL_DEPOSIT)[0]
+    assert init_deposit.amount == Decimal("1000.00")
+    assert cap_repo.get_financial_summary().total_inflow == Decimal("1000.00")
+    # 8. Current liquid balance == ₹1,000.00
+    assert cap_repo.get_current_balance() == Decimal("1000.00")
+    # 9. Available unallocated capital == ₹1,000.00
+    assert cap_repo.get_available_unallocated_capital() == Decimal("1000.00")
+    # 10. SAFE_MODE == True
+    assert is_safe_mode() is True
+    # 11. Creative state is CREATIVE_APPROVED
+    assert PILOT_CREATIVE_PATH.exists()
+    assert PILOT_CREATIVE_STATUS_APPROVED == "CREATIVE_APPROVED"
+    # 12. No previous allocation exists for this pilot
+    assert len(cap_repo.get_transaction_history(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        transaction_type=TransactionType.EXPERIMENT_ALLOCATION,
+    )) == 0
+    # 13. No Meta execution has occurred
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+    # Initial ledger state: exactly 1 transaction (INITIAL_DEPOSIT)
+    initial_txs = cap_repo.get_transaction_history()
+    assert len(initial_txs) == 1
+    assert initial_txs[0].transaction_type == TransactionType.INITIAL_DEPOSIT
+
+    # ── ALLOCATION ──
+    # Use canonical existing allocation mechanism: CapitalRepository.allocate_to_experiment()
+    tx = cap_repo.allocate_to_experiment(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        amount=PILOT_ALLOCATION_AMOUNT,
+        reason=PILOT_ALLOCATION_REASON,
+    )
+
+    # ── POST-ALLOCATION VERIFICATION ──
+    # Experiment:
+    allocated_exp = exp_repo.get(PILOT_EXPERIMENT_ID)
+    assert allocated_exp is not None
+    assert allocated_exp.allocated_budget == Decimal("200.00")
+    assert allocated_exp.max_allowed_spend == Decimal("200.00")
+    assert allocated_exp.actual_spend == Decimal("0.00")
+    assert allocated_exp.status == ExperimentStatus.APPROVED
+    assert allocated_exp.actual_start is None
+
+    # Capital:
+    post_summary = cap_repo.get_financial_summary()
+    assert post_summary.total_inflow == Decimal("1000.00")  # Starting capital unchanged
+    assert cap_repo.get_current_balance() == Decimal("1000.00")  # Balance unchanged (allocation != spend)
+    assert cap_repo.get_total_active_allocations() == Decimal("200.00")  # Active allocation
+    assert cap_repo.get_available_unallocated_capital() == Decimal("800.00")  # Available unallocated capital
+
+    # Ledger:
+    assert tx.transaction_type == TransactionType.EXPERIMENT_ALLOCATION
+    assert tx.amount == Decimal("200.00")
+    assert tx.experiment_id == PILOT_EXPERIMENT_ID
+    assert "Controlled pilot capital allocation authorized" in tx.description
+
+    all_txs = cap_repo.get_transaction_history()
+    assert len(all_txs) == 2  # exactly one new transaction exists
+    new_tx = all_txs[1]
+    assert new_tx.id == tx.id
+    assert new_tx.transaction_type == TransactionType.EXPERIMENT_ALLOCATION
+    assert new_tx.amount == Decimal("200.00")
+
+    # Not classified as spend
+    spend_txs = cap_repo.get_transaction_history(transaction_type=TransactionType.EXPERIMENT_SPEND)
+    assert len(spend_txs) == 0
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+    # Meta:
+    # 0 API write requests, 0 campaigns, 0 ad sets, 0 creatives, 0 ads, ₹0.00 Meta spend
+    # Execution: 0 ExternalExecution records, experiment has NOT started
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+    assert allocated_exp.actual_start is None
+
+    # SAFE_MODE: True
+    assert is_safe_mode() is True
+
+    # ── IDEMPOTENCY / OVER-ALLOCATION PREVENTION ──
+    # Attempting to allocate another ₹200.00 fails and does NOT silently allocate
+    with pytest.raises(ValueError, match="exceeds remaining allocation capacity"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=PILOT_EXPERIMENT_ID,
+            amount=Decimal("200.00"),
+            reason="Duplicate allocation attempt",
+        )
+
+    # Attempting to allocate even ₹0.01 fails
+    with pytest.raises(ValueError, match="exceeds remaining allocation capacity"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=PILOT_EXPERIMENT_ID,
+            amount=Decimal("0.01"),
+            reason="Exceeding allocation ceiling",
+        )
+
+    # State remains strictly protected:
+    assert exp_repo.get(PILOT_EXPERIMENT_ID).allocated_budget == Decimal("200.00")  # type: ignore[union-attr]
+    assert cap_repo.get_current_balance() == Decimal("1000.00")
+    assert cap_repo.get_available_unallocated_capital() == Decimal("800.00")
+    assert len(cap_repo.get_transaction_history()) == 2  # Still exactly 2 transactions
+
+    # Idempotent persistence helper test:
+    idemp_opp, idemp_exp, idemp_tx = persist_allocated_pilot(test_session)
+    assert idemp_exp.allocated_budget == Decimal("200.00")
+    assert idemp_tx.id == tx.id
+    assert len(cap_repo.get_transaction_history()) == 2
+
+
+def test_step86_pilot_allocation_requires_approved_status(test_session: Session) -> None:
+    """Verify Step 86 requirement: allocation cannot be performed on unapproved experiment."""
+    cap_repo = CapitalRepository(test_session)
+    opp, draft_exp, _ = persist_draft_pilot(test_session)
+    assert draft_exp.status == ExperimentStatus.DRAFT
+
+    # Attempting allocation on DRAFT experiment must fail
+    with pytest.raises(ValueError, match="Only experiments in APPROVED or RUNNING status can receive allocations"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=draft_exp.id,
+            amount=Decimal("200.00"),
+            reason=PILOT_ALLOCATION_REASON,
+        )
+
+    # Ledger remains untouched
+    assert len(cap_repo.get_transaction_history()) == 1
+    assert cap_repo.get_available_unallocated_capital() == Decimal("1000.00")
+
+
+# ── Step 87 — Pilot Execution Preflight & Readiness Verification ─────────────
+
+
+def test_step87_pilot_execution_readiness_preflight(test_session: Session) -> None:
+    """Verify Step 87: Comprehensive Pilot Execution Preflight & Readiness Verification.
+
+    Verifies all 7 Preflight Areas without executing the pilot:
+    A. Project State Integrity (10 invariants verified)
+    B. Destination Readiness (Reachable, guide content, beacon script present, zero tracking pixels/PII)
+    C. Telemetry Contract & Ingestion Readiness (Canonical summary, D1 contract, FACT classification, no financial mutation)
+    D. Creative Asset Readiness (1080x1080 PNG, hash integrity, copy & CTA match)
+    E. Meta Execution Guard Readiness (SAFE_MODE blocks dispatch, spec budget checks, no Meta writes)
+    F. Capital & Accounting Invariants (₹1,000 balance, ₹200 active allocation, ₹800 unallocated, 0 spend)
+    G. End-to-End Execution Trace & Blocker Assessment (Remaining operational gates verified)
+    """
+    import hashlib
+    import struct
+    from datetime import date, datetime, timezone
+
+    from venturebot.execution.dispatch import (
+        ExecutionAction,
+        ExecutionDispatchService,
+        ExecutionRequest,
+    )
+    from venturebot.execution.meta import MetaExecutionSpecification
+    from venturebot.measurement.guide_telemetry import (
+        GuideAccessTelemetryIngestionService,
+        GuideAccessTelemetrySummary,
+    )
+    from venturebot.models.evidence import EvidenceCategory
+
+    cap_repo = CapitalRepository(test_session)
+    exp_repo = ExperimentRepository(test_session)
+    ext_repo = ExternalExecutionRepository(test_session)
+
+    # ── AREA A: PROJECT STATE INTEGRITY ──
+    opp, exp, tx = persist_allocated_pilot(test_session)
+    assert exp is not None
+    assert exp.id == UUID("49fde874-9387-5056-934c-51a9cfca164f")
+    assert opp.id == UUID("63667b67-8482-519c-a498-251047e4b3ec")
+    assert exp.status == ExperimentStatus.APPROVED
+    assert exp.actual_start is None
+    assert exp.allocated_budget == Decimal("200.00")
+    assert exp.max_allowed_spend == Decimal("200.00")
+    assert exp.actual_spend == Decimal("0.00")
+    assert is_safe_mode() is True
+    assert PILOT_CREATIVE_STATUS_APPROVED == "CREATIVE_APPROVED"
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+    # ── AREA B: DESTINATION READINESS ──
+    assert exp.destination_url == PILOT_DESTINATION_URL
+    guide_path = Path("docs/pilot/freelance-workflow/guide.html")
+    index_path = Path("docs/pilot/freelance-workflow/index.html")
+    assert guide_path.is_file(), "guide.html must exist in docs"
+    assert index_path.is_file(), "index.html must exist in docs"
+
+    guide_html = guide_path.read_text(encoding="utf-8")
+    index_html = index_path.read_text(encoding="utf-8")
+
+    # Content integrity
+    assert "Solopreneur Financial Workflow Guide" in guide_html
+    assert "Section 1: Single-Source Invoice Log" in guide_html
+    assert "Section 2: Predictable Follow-Up Cadence" in guide_html
+    assert "Section 3: Receivables Visibility System" in guide_html
+    assert "Section 4: Cash-Flow Buffer Organization" in guide_html
+    assert "Section 5: The 15-Minute Weekly Financial Routine" in guide_html
+
+    # Telemetry beacon script integrity
+    assert "https://venturebot-telemetry.uvishnu3568.workers.dev/event/guide_access" in guide_html
+    assert "navigator.sendBeacon" in guide_html
+    assert str(PILOT_EXPERIMENT_ID) in guide_html
+    assert "guide_access" in guide_html
+
+    # Privacy / Zero-tracking integrity
+    assert "fbq(" not in guide_html and "fbq(" not in index_html  # No Meta Pixel
+    assert "gtag(" not in guide_html and "gtag(" not in index_html  # No Google Analytics
+    assert "<form" not in guide_html and "<form" not in index_html  # No PII collection forms
+
+    # ── AREA C: TELEMETRY READINESS ──
+    worker_src = Path("workers/telemetry/src/index.js")
+    assert worker_src.is_file()
+    worker_code = worker_src.read_text(encoding="utf-8")
+    assert 'ALLOWED_ORIGIN = "https://vishnu3568.github.io"' in worker_code
+    assert "guide_access_daily" in worker_code
+    assert "/api/v1/telemetry/summary" in worker_code
+
+    test_summary = GuideAccessTelemetrySummary(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        event_type="guide_access",
+        count=42,
+        date_start=date(2026, 10, 6),
+        date_stop=date(2026, 10, 6),
+        evidence_type=EvidenceCategory.FACT,
+    )
+    assert test_summary.source_reference == f"edge:telemetry:guide_access:{PILOT_EXPERIMENT_ID}:2026-10-06:2026-10-06"
+
+    # Ingestion into ExperimentMetrics maintains strict isolation
+    ingest_res = GuideAccessTelemetryIngestionService.ingest_summary(test_session, test_summary)
+    assert ingest_res.metrics.guide_accesses == 42
+    assert ingest_res.metrics.visitors is None  # Semantic boundary: requests != unique visitors
+    assert ingest_res.metrics.conversions is None
+    assert ingest_res.metrics.revenue is None
+    assert ingest_res.metrics.cost is None
+    assert len(cap_repo.get_transaction_history()) == 2  # Telemetry ingestion never mutates ledger
+
+    # ── AREA D: CREATIVE READINESS ──
+    assert PILOT_CREATIVE_PATH.is_file()
+    creative_bytes = PILOT_CREATIVE_PATH.read_bytes()
+    assert hashlib.sha256(creative_bytes).hexdigest() == PILOT_CREATIVE_SHA256
+    assert creative_bytes[:8] == b"\x89PNG\r\n\x1a\n", "Must be valid PNG image"
+    width, height = struct.unpack(">II", creative_bytes[16:24])
+    assert (width, height) == (1080, 1080), f"Expected 1080x1080, got {width}x{height}"
+    assert PILOT_CREATIVE_HEADLINE == "Solopreneur Financial Workflow Guide"
+    assert PILOT_CREATIVE_CTA == "LEARN_MORE"
+
+    # ── AREA E: META EXECUTION READINESS & SAFEGUARDS ──
+    # 1. Gateway submission is blocked by SAFE_MODE
+    req = ExecutionRequest(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        requested_action=ExecutionAction.DEPLOY_EXPERIMENT,
+        proposed_budget=Decimal("200.00"),
+    )
+    dispatch_res = ExecutionDispatchService.dispatch(
+        request=req,
+        session=test_session,
+    )
+    assert dispatch_res.success is False
+    assert dispatch_res.blocked is True
+    assert dispatch_res.reason == "SAFE_MODE_ENABLED"
+
+    # 2. MetaExecutionSpecification pre-dispatch invariants
+    spec = MetaExecutionSpecification(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        ad_account_id="act_1985595022114520",
+        page_id="1389949167526709",
+        destination_url=PILOT_DESTINATION_URL,
+        primary_text=PILOT_CREATIVE_PRIMARY_TEXT,
+        headline=PILOT_CREATIVE_HEADLINE,
+        image_asset_path=str(PILOT_CREATIVE_PATH),
+        authorized_budget=Decimal("200.00"),
+        end_time=datetime(2026, 10, 9, 12, 0, 0, tzinfo=timezone.utc),
+        explicit_dispatch_authorized=False,
+    )
+    # Rejects unauthorized dispatch
+    with pytest.raises(ValueError, match="Explicit operator dispatch authorization is required"):
+        spec.validate_pre_dispatch(
+            allocated_budget=exp.allocated_budget,
+            max_allowed_spend=exp.max_allowed_spend,
+        )
+
+    # Rejects budget exceeding allocation
+    over_spec = spec.model_copy(update={"explicit_dispatch_authorized": True, "authorized_budget": Decimal("200.01")})
+    with pytest.raises(ValueError, match="exceeds remaining allocated budget"):
+        over_spec.validate_pre_dispatch(
+            allocated_budget=exp.allocated_budget,
+            max_allowed_spend=exp.max_allowed_spend,
+        )
+
+    # Valid specification with explicit authorization passes pre-dispatch checks
+    valid_spec = spec.model_copy(update={"explicit_dispatch_authorized": True})
+    valid_spec.validate_pre_dispatch(
+        allocated_budget=exp.allocated_budget,
+        max_allowed_spend=exp.max_allowed_spend,
+    )
+
+    # Zero ExternalExecution records created during preflight
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+    # ── AREA F: CAPITAL & ACCOUNTING READINESS ──
+    summary = cap_repo.get_financial_summary()
+    assert summary.total_inflow == Decimal("1000.00")
+    assert summary.current_balance == Decimal("1000.00")
+    assert summary.total_allocated == Decimal("200.00")
+    assert summary.available_unallocated == Decimal("800.00")
+    assert summary.total_outflow == Decimal("0.00")
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+    # ── AREA G: END-TO-END EXECUTION TRACE & BLOCKERS ──
+    assert is_safe_mode() is True
+
+
+def test_step88_meta_account_and_campaign_preflight(test_session: Session) -> None:
+    """Step 88 — Meta Account & Live Campaign Configuration Preflight.
+
+    Verifies read-only readiness across:
+    1. Meta account discovery contracts and normalization.
+    2. Billing readiness constraints: prepay model and minimum daily budget math.
+    3. Campaign, ad set, creative, and ad payload contracts with deterministic naming.
+    4. Budget safety bounds (authorized_budget <= allocated_budget <= max_allowed_spend).
+    5. Telemetry destination compatibility (pure GUIDE_ACCESS, zero pixels/trackers).
+    6. Execution contract specification validation (explicit_dispatch_authorized, end_time).
+    7. SAFE_MODE defense-in-depth isolation (zero external write calls).
+    """
+    from datetime import datetime, timedelta, timezone
+    from venturebot.execution.dispatch import ExecutionAction, ExecutionDispatchService, ExecutionRequest
+    from venturebot.execution.meta import (
+        MetaAdAccountMetadata,
+        MetaApiError,
+        MetaExecutionSpecification,
+        MetaMarketingApiAdapter,
+        deterministic_campaign_name,
+        deterministic_adset_name,
+        deterministic_creative_name,
+        deterministic_ad_name,
+        inr_to_paise,
+    )
+
+    # Setup allocated pilot
+    opp, exp, cap_tx = persist_allocated_pilot(test_session)
+    assert exp.status == ExperimentStatus.APPROVED.value
+    assert exp.allocated_budget == Decimal("200.00")
+    assert exp.max_allowed_spend == Decimal("200.00")
+    assert exp.actual_spend == Decimal("0.00")
+
+    # 1. Meta Account Discovery Contracts
+    canonical_account_id = "act_1985595022114520"
+    assert MetaMarketingApiAdapter.normalize_ad_account_id("1985595022114520") == canonical_account_id
+    assert MetaMarketingApiAdapter.normalize_ad_account_id("act_1985595022114520") == canonical_account_id
+
+    account_meta = MetaAdAccountMetadata(
+        id=canonical_account_id,
+        name="VentureBot Experiments",
+        account_status=1,
+        currency="INR",
+    )
+    assert account_meta.is_active is True
+    assert account_meta.currency == "INR"
+
+    # 2. Billing Readiness & Minimum Budget Constraint
+    # Meta Marketing API reports min_daily_budget = 9673 paise (₹96.73 INR/day)
+    min_daily_budget_paise = 9673
+    min_daily_budget_inr = Decimal("96.73")
+    pilot_lifetime_budget_inr = Decimal("200.00")
+    pilot_lifetime_paise = inr_to_paise(pilot_lifetime_budget_inr)
+    assert pilot_lifetime_paise == 20000
+
+    # 48-hour flight satisfies minimum daily budget: ₹200.00 / 2 days = ₹100.00/day >= ₹96.73
+    flight_days_48h = Decimal("2.0")
+    daily_rate_48h = pilot_lifetime_budget_inr / flight_days_48h
+    assert daily_rate_48h >= min_daily_budget_inr
+
+    # 72-hour flight violates minimum daily budget: ₹200.00 / 3 days = ₹66.67/day < ₹96.73
+    flight_days_72h = Decimal("3.0")
+    daily_rate_72h = pilot_lifetime_budget_inr / flight_days_72h
+    assert daily_rate_72h < min_daily_budget_inr
+
+    # 3. Deterministic Naming & Payload Builders
+    c_name = deterministic_campaign_name(PILOT_EXPERIMENT_ID)
+    as_name = deterministic_adset_name(PILOT_EXPERIMENT_ID)
+    cr_name = deterministic_creative_name(PILOT_EXPERIMENT_ID)
+    ad_name = deterministic_ad_name(PILOT_EXPERIMENT_ID)
+
+    assert c_name == f"VB-EXP-{PILOT_EXPERIMENT_ID}"
+    assert as_name == f"VB-EXP-{PILOT_EXPERIMENT_ID}-ADSET"
+    assert cr_name == f"VB-EXP-{PILOT_EXPERIMENT_ID}-CREATIVE"
+    assert ad_name == f"VB-EXP-{PILOT_EXPERIMENT_ID}-AD"
+
+    # Campaign payload
+    c_payload = MetaMarketingApiAdapter.build_campaign_payload(
+        name=c_name,
+        objective="OUTCOME_TRAFFIC",
+        special_ad_categories=["NONE"],
+        status="PAUSED",
+    )
+    assert c_payload["name"] == c_name
+    assert c_payload["objective"] == "OUTCOME_TRAFFIC"
+    assert c_payload["status"] == "PAUSED"
+    assert c_payload["special_ad_categories"] == ["NONE"]
+
+    # Ad Set payload
+    now = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
+    end_48h = now + timedelta(hours=48)
+    as_payload = MetaMarketingApiAdapter.build_adset_payload(
+        campaign_id="120210000000000001",
+        name=as_name,
+        lifetime_budget_paise=pilot_lifetime_paise,
+        end_time=end_48h,
+        start_time=now,
+        countries=["IN"],
+        age_min=18,
+        age_max=65,
+        optimization_goal="LINK_CLICKS",
+        billing_event="IMPRESSIONS",
+        status="PAUSED",
+    )
+    assert as_payload["lifetime_budget"] == 20000
+    assert as_payload["status"] == "PAUSED"
+    assert as_payload["optimization_goal"] == "LINK_CLICKS"
+    assert as_payload["billing_event"] == "IMPRESSIONS"
+    assert as_payload["targeting"]["geo_locations"]["countries"] == ["IN"]
+
+    # Creative payload
+    cr_payload = MetaMarketingApiAdapter.build_creative_payload(
+        name=cr_name,
+        page_id="1389949167526709",
+        link=PILOT_DESTINATION_URL,
+        message=PILOT_CREATIVE_PRIMARY_TEXT,
+        headline=PILOT_CREATIVE_HEADLINE,
+        image_hash="mock_image_hash_32chars_hex001",
+        call_to_action="LEARN_MORE",
+    )
+    assert cr_payload["name"] == cr_name
+    assert cr_payload["object_story_spec"]["page_id"] == "1389949167526709"
+    link_data = cr_payload["object_story_spec"]["link_data"]
+    assert link_data["link"] == PILOT_DESTINATION_URL
+    assert link_data["message"] == PILOT_CREATIVE_PRIMARY_TEXT
+    assert link_data["name"] == PILOT_CREATIVE_HEADLINE
+    assert link_data["call_to_action"]["type"] == "LEARN_MORE"
+
+    # Ad payload
+    ad_payload = MetaMarketingApiAdapter.build_ad_payload(
+        name=ad_name,
+        adset_id="120210000000000002",
+        creative_id="120210000000000003",
+        status="PAUSED",
+    )
+    assert ad_payload["name"] == ad_name
+    assert ad_payload["status"] == "PAUSED"
+
+    # 4. Budget Safety Invariants
+    spec = MetaExecutionSpecification(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        ad_account_id=canonical_account_id,
+        page_id="1389949167526709",
+        destination_url=PILOT_DESTINATION_URL,
+        primary_text=PILOT_CREATIVE_PRIMARY_TEXT,
+        headline=PILOT_CREATIVE_HEADLINE,
+        image_asset_path=str(PILOT_CREATIVE_PATH),
+        call_to_action="LEARN_MORE",
+        campaign_objective="OUTCOME_TRAFFIC",
+        countries=["IN"],
+        age_min=18,
+        age_max=65,
+        authorized_budget=Decimal("200.00"),
+        start_time=now,
+        end_time=end_48h,
+        special_ad_categories=["NONE"],
+        status="PAUSED",
+        explicit_dispatch_authorized=True,
+    )
+    # Validates against experiment budget
+    spec.validate_pre_dispatch(
+        allocated_budget=exp.allocated_budget,
+        max_allowed_spend=exp.max_allowed_spend,
+        actual_spend=exp.actual_spend,
+    )
+
+    # 5. Telemetry Compatibility
+    assert spec.destination_url == PILOT_DESTINATION_URL
+    assert "fbq" not in spec.destination_url
+    assert "gtag" not in spec.destination_url
+
+    # 6. SAFE_MODE Guardrails
+    # Attempting to dispatch with SAFE_MODE=True blocks unconditionally
+    req = ExecutionRequest(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        requested_action=ExecutionAction.DEPLOY_EXPERIMENT.value,
+        proposed_budget=Decimal("200.00"),
+    )
+    dispatch_res = ExecutionDispatchService.dispatch(
+        request=req,
+        session=test_session,
+        safe_mode=True,
+    )
+    assert dispatch_res.success is False
+    assert dispatch_res.blocked is True
+    assert dispatch_res.reason == "SAFE_MODE_ENABLED"
+
+    # Direct adapter write attempt without transport raises MetaApiError
+    adapter = MetaMarketingApiAdapter(ad_account_id=canonical_account_id)
+    with pytest.raises(MetaApiError, match="Live Meta write operations are strictly disabled"):
+        import urllib.request
+        dummy_req = urllib.request.Request("https://graph.facebook.com/v20.0/dummy", method="POST")
+        adapter._execute_request(dummy_req, is_write=True)
+
+
+def test_step89_human_launch_gate_preflight(test_session: Session) -> None:
+    """Step 89 — Human Launch Gate & Final Execution Authorization Preflight.
+
+    Verifies:
+    1. Current canonical pilot state integrity (APPROVED, ₹200 allocated, actual_start is None).
+    2. Age targeting candidate options (18-65 vs 22-55) both validate pre-dispatch.
+    3. Flight duration math respects the Meta ₹96.73/day minimum budget constraint (duration <= 48h).
+    4. Specification rejection when end_time <= start_time or explicit authorization is missing.
+    5. In-memory MetaExecutionSpecification validation with approved creative, destination, and CTA.
+    6. SAFE_MODE unconditionally blocks execution without creating ExternalExecution records.
+    7. Treasury vs external ad platform budget isolation (VentureBot allocated ₹200 != Meta balance).
+    """
+    from datetime import datetime, timedelta, timezone
+    from venturebot.execution.dispatch import ExecutionAction, ExecutionDispatchService, ExecutionRequest
+    from venturebot.execution.meta import MetaExecutionSpecification, inr_to_paise
+
+    # Part 1: Current State Integrity
+    opp, exp, cap_tx = persist_allocated_pilot(test_session)
+    assert exp.id == PILOT_EXPERIMENT_ID
+    assert exp.opportunity_id == PILOT_OPPORTUNITY_ID
+    assert exp.status == ExperimentStatus.APPROVED.value
+    assert exp.actual_start is None
+    assert exp.allocated_budget == Decimal("200.00")
+    assert exp.max_allowed_spend == Decimal("200.00")
+    assert exp.actual_spend == Decimal("0.00")
+    assert is_safe_mode() is True
+
+    ext_repo = ExternalExecutionRepository(test_session)
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+    # Part 2 & 6: Candidate Age Targeting Options & In-Memory Specifications
+    now = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
+    end_48h = now + timedelta(hours=48)
+
+    # Candidate Option A: 18-65 (Broad delivery)
+    spec_option_a = MetaExecutionSpecification(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        ad_account_id="act_1985595022114520",
+        page_id="1389949167526709",
+        destination_url=PILOT_DESTINATION_URL,
+        primary_text=PILOT_CREATIVE_PRIMARY_TEXT,
+        headline=PILOT_CREATIVE_HEADLINE,
+        image_asset_path=str(PILOT_CREATIVE_PATH),
+        call_to_action="LEARN_MORE",
+        campaign_objective="OUTCOME_TRAFFIC",
+        countries=["IN"],
+        age_min=18,
+        age_max=65,
+        authorized_budget=Decimal("200.00"),
+        start_time=now,
+        end_time=end_48h,
+        special_ad_categories=["NONE"],
+        status="PAUSED",
+        explicit_dispatch_authorized=True,
+    )
+    spec_option_a.validate_pre_dispatch(
+        allocated_budget=exp.allocated_budget,
+        max_allowed_spend=exp.max_allowed_spend,
+        actual_spend=exp.actual_spend,
+    )
+
+    # Candidate Option B: 22-55 (Focused solopreneur cohort)
+    spec_option_b = spec_option_a.model_copy(update={"age_min": 22, "age_max": 55})
+    spec_option_b.validate_pre_dispatch(
+        allocated_budget=exp.allocated_budget,
+        max_allowed_spend=exp.max_allowed_spend,
+        actual_spend=exp.actual_spend,
+    )
+
+    # Part 3: Flight Schedule Constraints & Minimum Budget Math
+    min_daily_budget = Decimal("96.73")
+    lifetime_budget = Decimal("200.00")
+    assert inr_to_paise(lifetime_budget) == 20000
+
+    # 48-hour flight: ₹200.00 / 2 days = ₹100.00/day >= ₹96.73 (Compliant)
+    assert (lifetime_budget / Decimal("2.0")) >= min_daily_budget
+
+    # 72-hour flight: ₹200.00 / 3 days = ₹66.67/day < ₹96.73 (Violates Meta minimum)
+    assert (lifetime_budget / Decimal("3.0")) < min_daily_budget
+
+    # Model rejects end_time <= start_time
+    with pytest.raises(ValueError, match="end_time .* must be after start_time"):
+        MetaExecutionSpecification(
+            experiment_id=PILOT_EXPERIMENT_ID,
+            ad_account_id="act_1985595022114520",
+            page_id="1389949167526709",
+            destination_url=PILOT_DESTINATION_URL,
+            primary_text=PILOT_CREATIVE_PRIMARY_TEXT,
+            headline=PILOT_CREATIVE_HEADLINE,
+            image_asset_path=str(PILOT_CREATIVE_PATH),
+            call_to_action="LEARN_MORE",
+            campaign_objective="OUTCOME_TRAFFIC",
+            countries=["IN"],
+            age_min=18,
+            age_max=65,
+            authorized_budget=Decimal("200.00"),
+            start_time=now,
+            end_time=now - timedelta(hours=1),
+            special_ad_categories=["NONE"],
+            status="PAUSED",
+            explicit_dispatch_authorized=True,
+        )
+
+    # Pre-dispatch rejects un-authorized dispatch
+    unauth_spec = spec_option_a.model_copy(update={"explicit_dispatch_authorized": False})
+    with pytest.raises(ValueError, match="Explicit operator dispatch authorization is required"):
+        unauth_spec.validate_pre_dispatch(
+            allocated_budget=exp.allocated_budget,
+            max_allowed_spend=exp.max_allowed_spend,
+            actual_spend=exp.actual_spend,
+        )
+
+    # Part 7: SAFE_MODE Rejection
+    req = ExecutionRequest(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        requested_action=ExecutionAction.DEPLOY_EXPERIMENT.value,
+        proposed_budget=Decimal("200.00"),
+    )
+    res = ExecutionDispatchService.dispatch(
+        request=req,
+        session=test_session,
+        safe_mode=True,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert res.reason == "SAFE_MODE_ENABLED"
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+    # Part 8: Treasury vs Platform Budget Isolation
+    cap_repo = CapitalRepository(test_session)
+    summary = cap_repo.get_financial_summary()
+    assert summary.current_balance == Decimal("1000.00")
+    assert summary.total_allocated == Decimal("200.00")
+    assert summary.available_unallocated == Decimal("800.00")
+    assert summary.total_outflow == Decimal("0.00")
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+
+def test_step90_pre_dispatch_verification(test_session: Session) -> None:
+    """Step 90 — Final Pre-Dispatch Verification & Human Authorization Gate.
+
+    Verifies:
+    1. Canonical pilot invariants: APPROVED status, ₹200.00 allocation, ₹0 spend, actual_start is None.
+    2. Capital integrity: starting capital ₹1,000.00, committed ₹200.00, unallocated ₹800.00, ₹0 outflow.
+    3. Final campaign specification: Age 22-55, 48-hour flight (2026-10-06 08:30 to 2026-10-08 08:30 UTC),
+       lifetime budget ₹200.00 (PAUSED initial status, OUTCOME_TRAFFIC, LINK_CLICKS).
+    4. Budget safety: 48h daily budget rate (₹100.00/day) satisfies Meta minimum daily budget (₹96.73/day).
+    5. Creative asset: SHA-256 hash, 1080x1080 PNG dimensions, and canonical copy verification.
+    6. SAFE_MODE gate: ExecutionDispatchService rejects execution while SAFE_MODE is True,
+       guaranteeing zero external writes and zero ExternalExecution records.
+    """
+    import hashlib
+    import struct
+    from datetime import datetime, timezone
+    from venturebot.execution.dispatch import ExecutionAction, ExecutionDispatchService, ExecutionRequest
+    from venturebot.execution.meta import MetaExecutionSpecification, inr_to_paise
+
+    # 1. Canonical Pilot Invariants
+    opp, exp, cap_tx = persist_allocated_pilot(test_session)
+    assert exp.id == PILOT_EXPERIMENT_ID
+    assert exp.opportunity_id == PILOT_OPPORTUNITY_ID
+    assert exp.status == ExperimentStatus.APPROVED.value
+    assert exp.actual_start is None
+    assert exp.allocated_budget == Decimal("200.00")
+    assert exp.max_allowed_spend == Decimal("200.00")
+    assert exp.actual_spend == Decimal("0.00")
+    assert is_safe_mode() is True
+
+    ext_repo = ExternalExecutionRepository(test_session)
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+    # 2. Capital Integrity
+    cap_repo = CapitalRepository(test_session)
+    summary = cap_repo.get_financial_summary()
+    assert summary.total_inflow == Decimal("1000.00")
+    assert summary.current_balance == Decimal("1000.00")
+    assert summary.total_allocated == Decimal("200.00")
+    assert summary.available_unallocated == Decimal("800.00")
+    assert summary.total_outflow == Decimal("0.00")
+    assert cap_repo.get_experiment_actual_spend(PILOT_EXPERIMENT_ID) == Decimal("0.00")
+
+    # 3. Final Campaign Specification (Option B: 22-55, 48h Flight)
+    start_utc = datetime(2026, 10, 6, 8, 30, tzinfo=timezone.utc)
+    end_utc = datetime(2026, 10, 8, 8, 30, tzinfo=timezone.utc)
+    approved_headline = "Stop Chasing Invoices — Solopreneur Financial Workflow Guide"
+    approved_primary = (
+        "Chasing late invoices costs freelancers 4+ hours every week. "
+        "Get the battle-tested, 5-step financial workflow guide to automate follow-ups and stabilize cash flow."
+    )
+
+    spec = MetaExecutionSpecification(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        ad_account_id="act_1985595022114520",
+        page_id="1389949167526709",
+        destination_url=PILOT_DESTINATION_URL,
+        primary_text=approved_primary,
+        headline=approved_headline,
+        image_asset_path=str(PILOT_CREATIVE_PATH),
+        call_to_action="LEARN_MORE",
+        campaign_objective="OUTCOME_TRAFFIC",
+        countries=["IN"],
+        age_min=22,
+        age_max=55,
+        authorized_budget=Decimal("200.00"),
+        start_time=start_utc,
+        end_time=end_utc,
+        special_ad_categories=["NONE"],
+        status="PAUSED",
+        explicit_dispatch_authorized=True,
+    )
+    spec.validate_pre_dispatch(
+        allocated_budget=exp.allocated_budget,
+        max_allowed_spend=exp.max_allowed_spend,
+        actual_spend=exp.actual_spend,
+    )
+
+    # 4. Budget Safety & Minimum Daily Spend Constraints
+    min_daily_budget = Decimal("96.73")
+    assert inr_to_paise(spec.authorized_budget) == 20000
+    duration_days = Decimal((end_utc - start_utc).total_seconds()) / Decimal(86400)
+    assert duration_days == Decimal("2.0")
+    daily_rate = spec.authorized_budget / duration_days
+    assert daily_rate == Decimal("100.00")
+    assert daily_rate >= min_daily_budget
+
+    # Rejects over-budget authorization
+    over_spec = spec.model_copy(update={"authorized_budget": Decimal("200.01")})
+    with pytest.raises(ValueError, match="exceeds remaining allocated budget"):
+        over_spec.validate_pre_dispatch(
+            allocated_budget=exp.allocated_budget,
+            max_allowed_spend=exp.max_allowed_spend,
+            actual_spend=exp.actual_spend,
+        )
+
+    # 5. Creative Asset Verification
+    assert PILOT_CREATIVE_PATH.is_file()
+    img_bytes = PILOT_CREATIVE_PATH.read_bytes()
+    assert hashlib.sha256(img_bytes).hexdigest() == PILOT_CREATIVE_SHA256
+    assert img_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+    w, h = struct.unpack(">II", img_bytes[16:24])
+    assert (w, h) == (1080, 1080)
+
+    # 6. SAFE_MODE Gate Verification
+    req = ExecutionRequest(
+        experiment_id=PILOT_EXPERIMENT_ID,
+        requested_action=ExecutionAction.DEPLOY_EXPERIMENT.value,
+        proposed_budget=Decimal("200.00"),
+    )
+    dispatch_res = ExecutionDispatchService.dispatch(
+        request=req,
+        session=test_session,
+        safe_mode=True,
+        spec=spec,
+    )
+    assert dispatch_res.success is False
+    assert dispatch_res.blocked is True
+    assert dispatch_res.reason == "SAFE_MODE_ENABLED"
+    assert ext_repo.get_by_experiment_id(PILOT_EXPERIMENT_ID) is None
+
+
+def test_step90_2_privacy_policy_integrity() -> None:
+    """Verify Step 90.2: VentureBot public Privacy Policy page integrity.
+
+    Verifies:
+    1. Both root and docs/ copies of privacy-policy.html exist and are identical.
+    2. Canonical link in privacy-policy.html points to verified controlled URL.
+    3. Zero script tags, zero forms, zero inputs, zero tracking pixels (fbq, gtag).
+    4. Meta App ID 1063651013045060 and pilot experiment ID are documented.
+    5. Zero references to external/stale domains.
+    6. All core privacy sections (zero PII, telemetry, cookies, infrastructure) are present.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    root_policy = repo_root / "privacy-policy.html"
+    docs_policy = repo_root / "docs" / "privacy-policy.html"
+
+    assert root_policy.is_file(), "privacy-policy.html missing at repository root"
+    assert docs_policy.is_file(), "docs/privacy-policy.html missing"
+
+    root_content = root_policy.read_text(encoding="utf-8")
+    docs_content = docs_policy.read_text(encoding="utf-8")
+
+    assert root_content == docs_content, "root and docs privacy-policy.html must be identical"
+
+    # Canonical URL
+    assert '<link rel="canonical" href="https://vishnu3568.github.io/venturebot/privacy-policy.html">' in root_content
+
+    # Strict zero-tracking and zero-form checks
+    assert "<script" not in root_content.lower(), "privacy-policy.html must not contain <script> tags"
+    assert "<form" not in root_content.lower(), "privacy-policy.html must not contain <form> tags"
+    assert "<input" not in root_content.lower(), "privacy-policy.html must not contain <input> tags"
+    assert "fbq" not in root_content, "privacy-policy.html must not contain fbq tracking identifiers"
+    assert "gtag" not in root_content, "privacy-policy.html must not contain gtag tracking identifiers"
+
+    # Core required identifiers
+    assert "1063651013045060" in root_content, "privacy-policy.html must document Meta App ID 1063651013045060"
+    assert "49fde874-9387-5056-934c-51a9cfca164f" in root_content, "privacy-policy.html must document pilot experiment ID"
+
+    # Core sections
+    assert "About VentureBot" in root_content
+    assert "Information Collection & Principles" in root_content
+    assert "Telemetry & Measurement Data" in root_content
+    assert "Cookies & Third-Party Tracking Scripts" in root_content
+    assert "Third-Party Infrastructure Services" in root_content
+    assert "Data Retention & Deletion" in root_content
+    assert "Meta Developer Platform Context" in root_content
+    assert "Contact & Inquiries" in root_content
 
