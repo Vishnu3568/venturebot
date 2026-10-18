@@ -268,6 +268,116 @@ class CapitalRepository:
         """Return liquid capital available for new experiment allocations (current_balance - active_allocations)."""
         return max(Decimal("0.00"), self.get_current_balance() - self.get_total_active_allocations())
 
+    def allocate_to_experiment(
+        self,
+        experiment_id: UUID,
+        amount: Decimal | str | float,
+        reason: str,
+    ) -> CapitalTransaction:
+        """Allocate capital to an already approved experiment.
+
+        Enforces:
+        - Experiment must exist.
+        - Experiment must be in APPROVED or RUNNING status (allocatable states).
+        - Allocation amount must be positive (>= ₹0.01).
+        - Allocation amount must not exceed remaining allocation capacity:
+          remaining_capacity = max_allowed_spend - current allocated_budget.
+        - Allocation amount must not exceed available unallocated capital.
+        - Records EXPERIMENT_ALLOCATION ledger transaction atomically.
+        - Updates experiment's allocated_budget.
+        - Preserves zero actual_spend, untouched current_balance, and experiment status.
+        """
+        # 1. Validate reason
+        clean_reason = reason.strip() if reason else ""
+        if not clean_reason:
+            raise ValueError("Allocation requires an explicit, non-empty reason.")
+
+        # 2. Validate amount
+        if not isinstance(amount, Decimal):
+            try:
+                alloc_amount = Decimal(str(amount))
+            except Exception as e:
+                raise ValueError(f"Invalid allocation amount: {amount}") from e
+        else:
+            alloc_amount = amount
+
+        if alloc_amount < Decimal("0.01"):
+            raise ValueError(f"Allocation amount must be at least ₹0.01 (got ₹{alloc_amount:.2f}).")
+
+        # 3. Retrieve experiment
+        exp_orm = self.session.get(ExperimentORM, experiment_id)
+        if exp_orm is None:
+            raise ValueError(f"Experiment with ID '{experiment_id}' does not exist.")
+
+        # 4. Validate experiment state (must be APPROVED or RUNNING)
+        allowed_statuses = (ExperimentStatus.APPROVED.value, ExperimentStatus.RUNNING.value)
+        if exp_orm.status not in allowed_statuses:
+            raise ValueError(
+                f"Cannot allocate capital to experiment '{experiment_id}' in '{exp_orm.status}' status. "
+                f"Only experiments in APPROVED or RUNNING status can receive allocations."
+            )
+
+        # 5. Validate against remaining experiment capacity (max_allowed_spend - current allocated_budget)
+        current_allocated = (
+            exp_orm.allocated_budget
+            if isinstance(exp_orm.allocated_budget, Decimal)
+            else Decimal(str(exp_orm.allocated_budget or "0.00"))
+        )
+        max_allowed = (
+            exp_orm.max_allowed_spend
+            if isinstance(exp_orm.max_allowed_spend, Decimal)
+            else Decimal(str(exp_orm.max_allowed_spend or "0.00"))
+        )
+        remaining_capacity = max(Decimal("0.00"), max_allowed - current_allocated)
+        if alloc_amount > remaining_capacity:
+            raise ValueError(
+                f"Allocation amount (₹{alloc_amount:.2f}) exceeds remaining allocation capacity "
+                f"(₹{remaining_capacity:.2f} = max_allowed_spend ₹{max_allowed:.2f} - "
+                f"current allocated_budget ₹{current_allocated:.2f})."
+            )
+
+        # 6. Validate against pool headroom (available unallocated capital)
+        available_unallocated = self.get_available_unallocated_capital()
+        if alloc_amount > available_unallocated:
+            current_balance = self.get_current_balance()
+            active_allocations = self.get_total_active_allocations()
+            raise ValueError(
+                f"Insufficient available capital for allocation: requested ₹{alloc_amount:.2f}, "
+                f"but available unallocated capital is ₹{available_unallocated:.2f} "
+                f"(current balance: ₹{current_balance:.2f}, committed active allocations: ₹{active_allocations:.2f})."
+            )
+
+        # 7. Apply updates and record transaction atomically
+        try:
+            exp_orm.allocated_budget = current_allocated + alloc_amount
+
+            tx = CapitalTransaction(
+                experiment_id=experiment_id,
+                transaction_type=TransactionType.EXPERIMENT_ALLOCATION,
+                amount=alloc_amount,
+                description=f"Capital allocation of ₹{alloc_amount:.2f} for experiment '{experiment_id}': {clean_reason}",
+            )
+            orm_tx = CapitalTransactionORM(
+                id=tx.id,
+                experiment_id=tx.experiment_id,
+                transaction_type=tx.transaction_type.value,
+                amount=tx.amount,
+                description=tx.description,
+                recorded_at=tx.recorded_at,
+            )
+            self.session.add(orm_tx)
+
+            if self.auto_commit:
+                self.session.commit()
+            else:
+                self.session.flush()
+
+            return self._to_pydantic(orm_tx)
+        except Exception:
+            if self.auto_commit:
+                self.session.rollback()
+            raise
+
     @staticmethod
     def _to_pydantic(orm: CapitalTransactionORM) -> CapitalTransaction:
         """Convert SQLAlchemy ORM row to canonical Pydantic model."""
