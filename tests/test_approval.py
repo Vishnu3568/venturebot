@@ -611,3 +611,353 @@ def test_decision_records_are_append_only_immutable_audit_trail(
     # Chronological history intact
     assert any(d.outcome == DecisionOutcome.APPROVE and d.reason == "Initial pilot approval" for d in decisions)
     assert any(d.outcome == DecisionOutcome.HOLD and d.reason == "Market holiday; pause experiment for 3 days" for d in decisions)
+
+
+# ── 5. Controlled Post-Approval Capital Allocation (Step 85) ─────────────────
+
+
+def test_post_approval_allocation_success(
+    session: Session, sample_opportunity: Opportunity
+):
+    """Verify that an approved experiment with ₹0 allocation can receive capital post-approval."""
+    cap_repo = CapitalRepository(session)
+    cap_repo.initialize_starting_capital()
+    exp_repo = ExperimentRepository(session)
+
+    # 1. Create and approve experiment with ₹0 allocation
+    exp = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Testing post-approval allocation",
+            objective="Validate post-approval tranche funding",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("0.00"),
+            max_allowed_spend=Decimal("200.00"),
+            actual_spend=Decimal("0.00"),
+            success_criteria="Criteria",
+            failure_criteria="Failure",
+            status=ExperimentStatus.DRAFT,
+        )
+    )
+    app_res = ExperimentApprovalService.approve(
+        session,
+        experiment_id=exp.id,
+        reason="Approve pilot with zero initial budget",
+        allocated_budget=Decimal("0.00"),
+        max_allowed_spend=Decimal("200.00"),
+    )
+    assert app_res.is_approved is True
+    assert app_res.experiment is not None
+    assert app_res.experiment.allocated_budget == Decimal("0.00")
+    assert cap_repo.get_available_unallocated_capital() == Decimal("1000.00")
+
+    # 2. Perform post-approval capital allocation
+    tx = cap_repo.allocate_to_experiment(
+        experiment_id=exp.id,
+        amount=Decimal("120.00"),
+        reason="Authorize first testing tranche",
+    )
+
+    # Invariants verification
+    assert tx.transaction_type == TransactionType.EXPERIMENT_ALLOCATION
+    assert tx.amount == Decimal("120.00")
+    assert tx.experiment_id == exp.id
+    assert "Authorize first testing tranche" in tx.description
+
+    # Experiment state updated
+    updated_exp = exp_repo.get(exp.id)
+    assert updated_exp is not None
+    assert updated_exp.allocated_budget == Decimal("120.00")
+    assert updated_exp.max_allowed_spend == Decimal("200.00")
+    assert updated_exp.actual_spend == Decimal("0.00")
+    assert updated_exp.status == ExperimentStatus.APPROVED
+    assert updated_exp.actual_start is None
+
+    # Capital pool state updated
+    summary = cap_repo.get_financial_summary()
+    assert summary.current_balance == Decimal("1000.00")  # Cash untouched
+    assert summary.total_cost == Decimal("0.00")  # Cost untouched
+    assert summary.total_allocated == Decimal("120.00")  # Committed
+    assert summary.available_unallocated == Decimal("880.00")  # 1000 - 120
+    assert cap_repo.get_experiment_actual_spend(exp.id) == Decimal("0.00")
+
+
+def test_post_approval_allocation_cannot_exceed_remaining_max_allowed_spend(
+    session: Session, sample_opportunity: Opportunity
+):
+    """Allocation cannot exceed remaining capacity (max_allowed_spend - current allocated_budget)."""
+    cap_repo = CapitalRepository(session)
+    cap_repo.initialize_starting_capital()
+    exp_repo = ExperimentRepository(session)
+
+    exp = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Testing remaining capacity limits",
+            objective="Objective",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("0.00"),
+            max_allowed_spend=Decimal("200.00"),
+            actual_spend=Decimal("0.00"),
+            success_criteria="Criteria",
+            failure_criteria="Failure",
+            status=ExperimentStatus.DRAFT,
+        )
+    )
+    ExperimentApprovalService.approve(
+        session,
+        experiment_id=exp.id,
+        reason="Approve with ₹0 initial allocation",
+        allocated_budget=Decimal("0.00"),
+        max_allowed_spend=Decimal("200.00"),
+    )
+
+    # 1. Allocate ₹150.00 of ₹200.00 capacity -> succeeds
+    cap_repo.allocate_to_experiment(
+        experiment_id=exp.id,
+        amount=Decimal("150.00"),
+        reason="First tranche ₹150",
+    )
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("150.00")  # type: ignore[union-attr]
+
+    # 2. Attempting to allocate ₹100.00 (exceeds ₹50 remaining capacity) -> raises ValueError
+    with pytest.raises(ValueError, match="exceeds remaining allocation capacity"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=exp.id,
+            amount=Decimal("100.00"),
+            reason="Exceeding allocation",
+        )
+
+    # Experiment allocated budget untouched by failed attempt
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("150.00")  # type: ignore[union-attr]
+
+    # 3. Allocating exactly remaining capacity (₹50.00) -> succeeds
+    cap_repo.allocate_to_experiment(
+        experiment_id=exp.id,
+        amount=Decimal("50.00"),
+        reason="Final tranche ₹50",
+    )
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("200.00")  # type: ignore[union-attr]
+
+    # 4. Any further allocation attempt is rejected
+    with pytest.raises(ValueError, match="exceeds remaining allocation capacity"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=exp.id,
+            amount=Decimal("0.01"),
+            reason="Over-allocation attempt",
+        )
+
+
+def test_post_approval_allocation_cannot_exceed_available_unallocated_capital(
+    session: Session, sample_opportunity: Opportunity
+):
+    """Allocation is bounded by available liquid unallocated capital in the treasury pool."""
+    cap_repo = CapitalRepository(session)
+    cap_repo.initialize_starting_capital()  # ₹1,000.00
+    exp_repo = ExperimentRepository(session)
+
+    # Exp 1 approved and allocated ₹800.00 -> leaves ₹200.00 unallocated
+    exp1 = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Exp 1",
+            objective="Obj",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("800.00"),
+            max_allowed_spend=Decimal("800.00"),
+            status=ExperimentStatus.DRAFT,
+            success_criteria="C",
+            failure_criteria="F",
+        )
+    )
+    ExperimentApprovalService.approve(session, experiment_id=exp1.id, reason="Approve Exp 1 ₹800")
+    assert cap_repo.get_available_unallocated_capital() == Decimal("200.00")
+
+    # Exp 2 approved with ₹0 allocation, ₹500 ceiling
+    exp2 = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Exp 2",
+            objective="Obj",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("0.00"),
+            max_allowed_spend=Decimal("500.00"),
+            status=ExperimentStatus.DRAFT,
+            success_criteria="C",
+            failure_criteria="F",
+        )
+    )
+    ExperimentApprovalService.approve(session, experiment_id=exp2.id, reason="Approve Exp 2 ₹0", allocated_budget=Decimal("0.00"))
+
+    # Attempting to allocate ₹300.00 to Exp 2 (available is only ₹200.00) -> raises ValueError
+    with pytest.raises(ValueError, match="Insufficient available capital for allocation"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=exp2.id,
+            amount=Decimal("300.00"),
+            reason="Exceeding unallocated pool",
+        )
+
+    # Allocating ₹200.00 succeeds exactly
+    tx = cap_repo.allocate_to_experiment(
+        experiment_id=exp2.id,
+        amount=Decimal("200.00"),
+        reason="Allocate remaining unallocated capital",
+    )
+    assert tx.amount == Decimal("200.00")
+    assert cap_repo.get_available_unallocated_capital() == Decimal("0.00")
+
+
+def test_post_approval_allocation_requires_valid_experiment_state(
+    session: Session, sample_opportunity: Opportunity, sample_draft_experiment: Experiment
+):
+    """Allocation is strictly rejected for unapproved, completed, killed, or non-existent experiments."""
+    cap_repo = CapitalRepository(session)
+    cap_repo.initialize_starting_capital()
+    exp_repo = ExperimentRepository(session)
+
+    # 1. Non-existent experiment
+    with pytest.raises(ValueError, match="does not exist"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=uuid4(),
+            amount=Decimal("50.00"),
+            reason="Non-existent",
+        )
+
+    # 2. DRAFT experiment (not approved yet)
+    with pytest.raises(ValueError, match="Only experiments in APPROVED or RUNNING status"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=sample_draft_experiment.id,
+            amount=Decimal("50.00"),
+            reason="Draft allocation attempt",
+        )
+
+    # 3. KILLED experiment
+    ExperimentApprovalService.reject(session, experiment_id=sample_draft_experiment.id, reason="Rejected")
+    with pytest.raises(ValueError, match="Only experiments in APPROVED or RUNNING status"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=sample_draft_experiment.id,
+            amount=Decimal("50.00"),
+            reason="Killed allocation attempt",
+        )
+
+
+def test_post_approval_allocation_transactional_integrity(
+    session: Session, sample_opportunity: Opportunity
+):
+    """Database rollback preserves atomicity: no partial updates or orphaned records on failure."""
+    cap_repo = CapitalRepository(session, auto_commit=True)
+    cap_repo.initialize_starting_capital()
+    exp_repo = ExperimentRepository(session, auto_commit=True)
+
+    exp = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Atomic test",
+            objective="Obj",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("0.00"),
+            max_allowed_spend=Decimal("200.00"),
+            status=ExperimentStatus.DRAFT,
+            success_criteria="C",
+            failure_criteria="F",
+        )
+    )
+    ExperimentApprovalService.approve(session, experiment_id=exp.id, reason="Approve", allocated_budget=Decimal("0.00"))
+
+    # Initial transaction count
+    initial_tx_count = len(cap_repo.get_transaction_history())
+
+    # Invalid amount (< ₹0.01 or negative)
+    with pytest.raises(ValueError, match="Allocation amount must be at least"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=exp.id,
+            amount=Decimal("0.00"),
+            reason="Zero amount",
+        )
+
+    # Empty reason
+    with pytest.raises(ValueError, match="Allocation requires an explicit, non-empty reason"):
+        cap_repo.allocate_to_experiment(
+            experiment_id=exp.id,
+            amount=Decimal("50.00"),
+            reason="   ",
+        )
+
+    # Assert database is completely untouched
+    assert len(cap_repo.get_transaction_history()) == initial_tx_count
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("0.00")  # type: ignore[union-attr]
+
+
+def test_post_approval_allocation_decimal_precision(
+    session: Session, sample_opportunity: Opportunity
+):
+    """Verify exact Decimal precision handling with odd rupee/paise values."""
+    cap_repo = CapitalRepository(session)
+    cap_repo.initialize_starting_capital()
+    exp_repo = ExperimentRepository(session)
+
+    exp = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Decimal test",
+            objective="Obj",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("0.00"),
+            max_allowed_spend=Decimal("200.00"),
+            status=ExperimentStatus.DRAFT,
+            success_criteria="C",
+            failure_criteria="F",
+        )
+    )
+    ExperimentApprovalService.approve(session, experiment_id=exp.id, reason="Approve", allocated_budget=Decimal("0.00"))
+
+    # Allocate ₹49.99
+    tx1 = cap_repo.allocate_to_experiment(experiment_id=exp.id, amount=Decimal("49.99"), reason="Tranche 1")
+    assert tx1.amount == Decimal("49.99")
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("49.99")  # type: ignore[union-attr]
+
+    # Allocate string "150.01" (total ₹200.00)
+    tx2 = cap_repo.allocate_to_experiment(experiment_id=exp.id, amount="150.01", reason="Tranche 2")
+    assert tx2.amount == Decimal("150.01")
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("200.00")  # type: ignore[union-attr]
+
+
+def test_experiment_approval_service_delegates_allocation(
+    session: Session, sample_opportunity: Opportunity
+):
+    """ExperimentApprovalService.allocate_to_experiment correctly delegates to CapitalRepository."""
+    cap_repo = CapitalRepository(session)
+    cap_repo.initialize_starting_capital()
+    exp_repo = ExperimentRepository(session)
+
+    exp = exp_repo.create(
+        Experiment(
+            opportunity_id=sample_opportunity.id,
+            hypothesis="Delegation test",
+            objective="Obj",
+            channel=Channel.WEBSITE,
+            monetization_method=MonetizationMethod.DIRECT_SALE,
+            allocated_budget=Decimal("0.00"),
+            max_allowed_spend=Decimal("200.00"),
+            status=ExperimentStatus.DRAFT,
+            success_criteria="C",
+            failure_criteria="F",
+        )
+    )
+    ExperimentApprovalService.approve(session, experiment_id=exp.id, reason="Approve", allocated_budget=Decimal("0.00"))
+
+    tx = ExperimentApprovalService.allocate_to_experiment(
+        session,
+        experiment_id=exp.id,
+        amount=Decimal("100.00"),
+        reason="Delegated allocation",
+    )
+    assert tx.transaction_type == TransactionType.EXPERIMENT_ALLOCATION
+    assert tx.amount == Decimal("100.00")
+    assert exp_repo.get(exp.id).allocated_budget == Decimal("100.00")  # type: ignore[union-attr]
