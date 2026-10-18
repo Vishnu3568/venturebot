@@ -676,6 +676,7 @@ class MetaMarketingApiAdapter:
         objective: str = "OUTCOME_TRAFFIC",
         special_ad_categories: list[str] | None = None,
         status: str = "PAUSED",
+        is_adset_budget_sharing_enabled: bool = False,
     ) -> dict[str, Any]:
         """Construct deterministic creation payload for a Meta Campaign."""
         clean_name = name.strip() if name else ""
@@ -691,6 +692,7 @@ class MetaMarketingApiAdapter:
             "objective": objective.strip(),
             "special_ad_categories": categories,
             "status": "PAUSED",
+            "is_adset_budget_sharing_enabled": is_adset_budget_sharing_enabled,
         }
 
     @classmethod
@@ -742,12 +744,16 @@ class MetaMarketingApiAdapter:
             "name": clean_name,
             "optimization_goal": optimization_goal.strip(),
             "billing_event": billing_event.strip(),
+            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
             "targeting": {
                 "geo_locations": {
                     "countries": clean_countries,
                 },
                 "age_min": age_min,
                 "age_max": age_max,
+                "targeting_automation": {
+                    "advantage_audience": 0,
+                },
             },
             "lifetime_budget": lifetime_budget_paise,
             "end_time": formatted_end,
