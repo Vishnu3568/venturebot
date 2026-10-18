@@ -296,6 +296,7 @@ def test_build_campaign_payload():
         "objective": "OUTCOME_TRAFFIC",
         "special_ad_categories": ["NONE"],
         "status": "PAUSED",
+        "is_adset_budget_sharing_enabled": False,
     }
 
 
@@ -324,11 +325,14 @@ def test_build_adset_payload():
     assert payload["status"] == "PAUSED"
     assert payload["optimization_goal"] == "LINK_CLICKS"
     assert payload["billing_event"] == "IMPRESSIONS"
-    assert payload["end_time"] == "2026-10-08T12:00:00+00:00"
+    assert payload["bid_strategy"] == "LOWEST_COST_WITHOUT_CAP"
     assert payload["targeting"] == {
         "geo_locations": {"countries": ["IN"]},
         "age_min": 18,
         "age_max": 50,
+        "targeting_automation": {
+            "advantage_audience": 0,
+        },
     }
 
 
