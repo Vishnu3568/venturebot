@@ -13,7 +13,7 @@ from venturebot.database.repositories.capital import CapitalRepository
 from venturebot.database.repositories.decision import DecisionRepository
 from venturebot.database.repositories.experiment import ExperimentRepository
 from venturebot.database.repositories.opportunity import OpportunityRepository
-from venturebot.models.capital import TransactionType
+from venturebot.models.capital import CapitalTransaction, TransactionType
 from venturebot.models.decision import Decision, DecisionOutcome
 from venturebot.models.experiment import ExperimentStatus
 from venturebot.models.opportunity import OpportunityStatus
@@ -299,4 +299,21 @@ class ExperimentApprovalService:
             decision=decision,
             allocation_transaction=None,
             rejection_reason=f"Rejected: {clean_reason}",
+        )
+
+    @classmethod
+    def allocate_to_experiment(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        amount: Decimal | str | float,
+        reason: str,
+        auto_commit: bool = True,
+    ) -> CapitalTransaction:
+        """Allocate capital to an already approved experiment via CapitalRepository."""
+        cap_repo = CapitalRepository(session, auto_commit=auto_commit)
+        return cap_repo.allocate_to_experiment(
+            experiment_id=experiment_id,
+            amount=amount,
+            reason=reason,
         )
