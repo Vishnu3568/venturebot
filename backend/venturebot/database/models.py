@@ -319,4 +319,39 @@ class ExternalExecutionORM(Base):
 
     # Relationships
     experiment: Mapped[ExperimentORM] = relationship("ExperimentORM", back_populates="external_execution")
+    events: Mapped[list["ExternalExecutionEventORM"]] = relationship(
+        "ExternalExecutionEventORM",
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        order_by="ExternalExecutionEventORM.created_at",
+    )
+
+
+class ExternalExecutionEventORM(Base):
+    """Immutable audit log of external execution mutations, transitions, and lineage."""
+    __tablename__ = "external_execution_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    execution_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("external_executions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    tier: Mapped[str] = mapped_column(String(50), nullable=False)
+    old_resource_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    new_resource_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    api_request_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_response_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+    # Relationships
+    execution: Mapped[ExternalExecutionORM] = relationship("ExternalExecutionORM", back_populates="events")
 
