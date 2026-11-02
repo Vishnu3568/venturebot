@@ -117,18 +117,23 @@ def deterministic_campaign_name(experiment_id: UUID) -> str:
     return f"VB-EXP-{experiment_id}"
 
 
-def deterministic_adset_name(experiment_id: UUID) -> str:
-    """Generate deterministic Meta Ad Set name from canonical Experiment ID.
+def deterministic_adset_name(experiment_id: UUID, version: int = 1) -> str:
+    """Generate deterministic Meta Ad Set name from canonical Experiment ID and optional version.
 
     Args:
         experiment_id: Canonical Experiment UUID.
+        version: Integer version (>= 1). Version 1 produces standard name, version >= 2 appends '-v{version}'.
 
     Returns:
-        str: Deterministic ad set name formatted as 'VB-EXP-<experiment_id>-ADSET'.
+        str: Deterministic ad set name formatted as 'VB-EXP-<experiment_id>-ADSET' or 'VB-EXP-<experiment_id>-ADSET-v{version}'.
     """
     if not isinstance(experiment_id, UUID):
         raise TypeError(f"experiment_id must be a UUID, got {type(experiment_id).__name__}.")
-    return f"VB-EXP-{experiment_id}-ADSET"
+    if not isinstance(version, int) or version < 1:
+        raise ValueError(f"version must be an integer >= 1, got {version}.")
+    if version == 1:
+        return f"VB-EXP-{experiment_id}-ADSET"
+    return f"VB-EXP-{experiment_id}-ADSET-v{version}"
 
 
 def deterministic_creative_name(experiment_id: UUID) -> str:
@@ -667,6 +672,15 @@ class MetaMarketingApiAdapter:
         ver = api_version.strip() if api_version else cls.DEFAULT_GRAPH_API_VERSION
         return f"{cls.GRAPH_API_BASE_URL}/{ver}/{clean_id}"
 
+    @classmethod
+    def build_adset_schedule_update_url(
+        cls,
+        adset_id: str,
+        api_version: str = DEFAULT_GRAPH_API_VERSION,
+    ) -> str:
+        """Construct endpoint URL for updating an ad set."""
+        return cls.build_pause_url(adset_id, api_version=api_version)
+
     # ── Payload Builders ─────────────────────────────────────────────────────
 
     @classmethod
@@ -850,6 +864,46 @@ class MetaMarketingApiAdapter:
     def build_pause_payload(cls) -> dict[str, Any]:
         """Construct deterministic payload for pausing an existing Meta object."""
         return {"status": "PAUSED"}
+
+    @classmethod
+    def build_adset_schedule_update_payload(
+        cls,
+        start_time: datetime | str,
+        end_time: datetime | str,
+        status: str = "PAUSED",
+    ) -> dict[str, Any]:
+        """Construct deterministic payload for updating an ad set schedule.
+
+        Invariants enforced:
+        - status must strictly be 'PAUSED' for update safety.
+        - start_time and end_time must be formatted in ISO-8601 with timezone.
+        - end_time must be after start_time.
+        """
+        if status != "PAUSED":
+            raise ValueError("Schedule update status must strictly be 'PAUSED' for safety.")
+
+        def _format_time(t: datetime | str) -> str:
+            if isinstance(t, datetime):
+                if t.tzinfo is None:
+                    raise ValueError("datetime must be timezone-aware (e.g. UTC).")
+                return t.strftime("%Y-%m-%dT%H:%M:%S%z")
+            raw = str(t).strip()
+            if not raw:
+                raise ValueError("Schedule timestamp string must not be empty.")
+            return raw
+
+        start_str = _format_time(start_time)
+        end_str = _format_time(end_time)
+
+        if isinstance(start_time, datetime) and isinstance(end_time, datetime):
+            if end_time <= start_time:
+                raise ValueError(f"end_time ({end_time}) must be after start_time ({start_time}).")
+
+        return {
+            "start_time": start_str,
+            "end_time": end_str,
+            "status": "PAUSED",
+        }
 
     # ── Response Parsers ─────────────────────────────────────────────────────
 
@@ -1879,3 +1933,201 @@ class MetaMarketingApiAdapter:
 
         response_text = self._execute_request(req, is_write=True)
         return self.parse_pause_response(response_text)
+
+    def update_adset_schedule(
+        self,
+        adset_id: str,
+        start_time: datetime | str,
+        end_time: datetime | str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Update an ad set's schedule while guaranteeing it remains in PAUSED status."""
+        clean_id = adset_id.strip() if adset_id else ""
+        if not clean_id:
+            raise ValueError("adset_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        url = self.build_adset_schedule_update_url(clean_id, api_version=self.api_version)
+        payload = self.build_adset_schedule_update_payload(
+            start_time=start_time,
+            end_time=end_time,
+            status="PAUSED",
+        )
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        response_text = self._execute_request(req, is_write=True)
+        return self.parse_pause_response(response_text)
+
+    def pause_adset(
+        self,
+        adset_id: str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Pause mutation for an individual ad set."""
+        clean_id = adset_id.strip() if adset_id else ""
+        if not clean_id:
+            raise ValueError("adset_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        url = self.build_pause_url(clean_id, api_version=self.api_version)
+        payload = {"status": "PAUSED"}
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        response_text = self._execute_request(req, is_write=True)
+        return self.parse_pause_response(response_text)
+
+    def unpause_adset(
+        self,
+        adset_id: str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Explicitly unpause an ad set to begin delivery."""
+        clean_id = adset_id.strip() if adset_id else ""
+        if not clean_id:
+            raise ValueError("adset_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        url = self.build_pause_url(clean_id, api_version=self.api_version)
+        payload = {"status": "ACTIVE"}
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        response_text = self._execute_request(req, is_write=True)
+        return self.parse_pause_response(response_text)
+
+    def get_adset(
+        self,
+        adset_id: str,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Perform read-only query to retrieve current remote ad set metadata."""
+        clean_id = adset_id.strip() if adset_id else ""
+        if not clean_id:
+            raise ValueError("adset_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        fields = "id,name,status,effective_status,start_time,end_time,lifetime_budget,campaign_id,targeting,bid_strategy,billing_event,optimization_goal"
+        url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/{clean_id}?fields={fields}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        text = self._execute_request(req, is_write=False)
+        data = self._parse_json_dict(text)
+        if "error" in data and isinstance(data["error"], dict):
+            self._handle_meta_error_envelope(data["error"])
+        return data
+
+    def get_ad_review_status(
+        self,
+        ad_id: str,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Query policy review status and effective status for an ad."""
+        clean_id = ad_id.strip() if ad_id else ""
+        if not clean_id:
+            raise ValueError("ad_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        fields = "id,name,status,effective_status,adset_id"
+        url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/{clean_id}?fields={fields}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        text = self._execute_request(req, is_write=False)
+        data = self._parse_json_dict(text)
+        if "error" in data and isinstance(data["error"], dict):
+            self._handle_meta_error_envelope(data["error"])
+
+        eff_status = str(data.get("effective_status", "")).upper()
+        status = str(data.get("status", "")).upper()
+        is_disapproved = eff_status in ("DISAPPROVED", "WITH_ISSUES")
+        is_pending = eff_status in ("PENDING_REVIEW", "PREAPPROVED")
+        is_approved = eff_status in ("PAUSED", "ACTIVE") and not is_disapproved
+
+        return {
+            "id": str(data.get("id", clean_id)),
+            "status": status,
+            "effective_status": eff_status,
+            "is_approved": is_approved,
+            "is_pending": is_pending,
+            "is_disapproved": is_disapproved,
+        }
+
+    def get_campaign_budget_sharing(
+        self,
+        campaign_id: str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Query campaign to verify whether Advantage Campaign Budget (budget sharing) is active."""
+        clean_id = campaign_id.strip() if campaign_id else ""
+        if not clean_id:
+            raise ValueError("campaign_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        fields = "id,is_adset_budget_sharing_enabled,budget_rebalance_flag"
+        url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/{clean_id}?fields={fields}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        text = self._execute_request(req, is_write=False)
+        data = self._parse_json_dict(text)
+        if "error" in data and isinstance(data["error"], dict):
+            self._handle_meta_error_envelope(data["error"])
+
+        return bool(data.get("is_adset_budget_sharing_enabled", False))
