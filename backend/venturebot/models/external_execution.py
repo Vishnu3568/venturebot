@@ -16,9 +16,42 @@ class ExternalExecutionStatus(str, Enum):
     PARTIAL_CAMPAIGN = "partial_campaign"
     PARTIAL_ADSET = "partial_adset"
     PARTIAL_CREATIVE = "partial_creative"
+    DEPLOYED_DORMANT = "deployed_dormant"
     DEPLOYED = "deployed"
+    ACTIVATED = "activated"
     FAILED = "failed"
     TIMEOUT = "timeout"
+
+
+class ExternalExecutionEventType(str, Enum):
+    """Event types for immutable external execution audit logs."""
+
+    DEPLOYMENT_ATTEMPT = "deployment_attempt"
+    DEPLOYMENT_FAILED = "deployment_failed"
+    RESOURCE_CREATED = "resource_created"
+    RESOURCE_ADOPTED = "resource_adopted"
+    RESOURCE_SUPERSEDED = "resource_superseded"
+    SCHEDULE_LOCKED = "schedule_locked"
+    READINESS_CHECKED = "readiness_checked"
+    ACTIVATION_AUTHORIZED = "activation_authorized"
+    ACTIVATED = "activated"
+    DELIVERY_VERIFIED = "delivery_verified"
+    EMERGENCY_STOP = "emergency_stop"
+
+
+class ExternalExecutionEvent(BaseModel):
+    """Canonical immutable audit log record for external execution actions and transitions."""
+
+    id: UUID = Field(default_factory=uuid4)
+    execution_id: UUID
+    event_type: str
+    tier: str
+    old_resource_id: str | None = None
+    new_resource_id: str | None = None
+    reason: str
+    api_request_summary: str | None = None
+    api_response_summary: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ExternalExecution(BaseModel):
