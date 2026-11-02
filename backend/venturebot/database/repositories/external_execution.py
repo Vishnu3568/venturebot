@@ -8,8 +8,13 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from venturebot.database.models import ExternalExecutionORM
-from venturebot.models.external_execution import ExternalExecution, ExternalExecutionStatus
+from venturebot.database.models import ExternalExecutionEventORM, ExternalExecutionORM
+from venturebot.models.external_execution import (
+    ExternalExecution,
+    ExternalExecutionEvent,
+    ExternalExecutionEventType,
+    ExternalExecutionStatus,
+)
 
 
 class ExternalExecutionRepository:
@@ -98,6 +103,72 @@ class ExternalExecutionRepository:
         else:
             self.session.flush()
         return self._to_pydantic(orm)
+
+    def record_event(self, event: ExternalExecutionEvent) -> ExternalExecutionEvent:
+        """Persist an immutable audit log event for an external execution."""
+        orm = ExternalExecutionEventORM(
+            id=event.id,
+            execution_id=event.execution_id,
+            event_type=event.event_type,
+            tier=event.tier,
+            old_resource_id=event.old_resource_id,
+            new_resource_id=event.new_resource_id,
+            reason=event.reason,
+            api_request_summary=event.api_request_summary,
+            api_response_summary=event.api_response_summary,
+            created_at=event.created_at,
+        )
+        self.session.add(orm)
+        if self.auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return self._event_to_pydantic(orm)
+
+    def get_events(self, execution_id: UUID) -> list[ExternalExecutionEvent]:
+        """Retrieve all audit events for an execution in chronological order."""
+        stmt = (
+            select(ExternalExecutionEventORM)
+            .where(ExternalExecutionEventORM.execution_id == execution_id)
+            .order_by(ExternalExecutionEventORM.created_at.asc())
+        )
+        orms = self.session.scalars(stmt).all()
+        return [self._event_to_pydantic(o) for o in orms]
+
+    def get_superseded_resources(
+        self, execution_id: UUID, tier: str | None = None
+    ) -> list[ExternalExecutionEvent]:
+        """Retrieve all resource superseding events for an execution."""
+        stmt = (
+            select(ExternalExecutionEventORM)
+            .where(
+                ExternalExecutionEventORM.execution_id == execution_id,
+                ExternalExecutionEventORM.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            )
+            .order_by(ExternalExecutionEventORM.created_at.asc())
+        )
+        if tier is not None:
+            stmt = stmt.where(ExternalExecutionEventORM.tier == tier)
+        orms = self.session.scalars(stmt).all()
+        return [self._event_to_pydantic(o) for o in orms]
+
+    @staticmethod
+    def _event_to_pydantic(orm: ExternalExecutionEventORM) -> ExternalExecutionEvent:
+        c_at = orm.created_at
+        if c_at is not None and c_at.tzinfo is None:
+            c_at = c_at.replace(tzinfo=timezone.utc)
+        return ExternalExecutionEvent(
+            id=orm.id,
+            execution_id=orm.execution_id,
+            event_type=orm.event_type,
+            tier=orm.tier,
+            old_resource_id=orm.old_resource_id,
+            new_resource_id=orm.new_resource_id,
+            reason=orm.reason,
+            api_request_summary=orm.api_request_summary,
+            api_response_summary=orm.api_response_summary,
+            created_at=c_at,
+        )
 
     @staticmethod
     def _to_pydantic(orm: ExternalExecutionORM) -> ExternalExecution:
