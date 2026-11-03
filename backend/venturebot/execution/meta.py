@@ -2131,3 +2131,151 @@ class MetaMarketingApiAdapter:
             self._handle_meta_error_envelope(data["error"])
 
         return bool(data.get("is_adset_budget_sharing_enabled", False))
+
+    def unpause_campaign(
+        self,
+        campaign_id: str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Explicitly unpause a campaign to permit downstream delivery."""
+        clean_id = campaign_id.strip() if campaign_id else ""
+        if not clean_id:
+            raise ValueError("campaign_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        url = self.build_pause_url(clean_id, api_version=self.api_version)
+        payload = {"status": "ACTIVE"}
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        response_text = self._execute_request(req, is_write=True)
+        return self.parse_pause_response(response_text)
+
+    def pause_ad(
+        self,
+        ad_id: str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Pause mutation for an individual ad."""
+        clean_id = ad_id.strip() if ad_id else ""
+        if not clean_id:
+            raise ValueError("ad_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        url = self.build_pause_url(clean_id, api_version=self.api_version)
+        payload = {"status": "PAUSED"}
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        response_text = self._execute_request(req, is_write=True)
+        return self.parse_pause_response(response_text)
+
+    def unpause_ad(
+        self,
+        ad_id: str,
+        access_token: str | None = None,
+    ) -> bool:
+        """Explicitly unpause an ad to begin serving impressions."""
+        clean_id = ad_id.strip() if ad_id else ""
+        if not clean_id:
+            raise ValueError("ad_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        url = self.build_pause_url(clean_id, api_version=self.api_version)
+        payload = {"status": "ACTIVE"}
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        response_text = self._execute_request(req, is_write=True)
+        return self.parse_pause_response(response_text)
+
+    def get_ad(
+        self,
+        ad_id: str,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Perform read-only query to retrieve current remote ad metadata."""
+        clean_id = ad_id.strip() if ad_id else ""
+        if not clean_id:
+            raise ValueError("ad_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        fields = "id,name,status,effective_status,adset_id"
+        url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/{clean_id}?fields={fields}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        text = self._execute_request(req, is_write=False)
+        data = self._parse_json_dict(text)
+        if "error" in data and isinstance(data["error"], dict):
+            self._handle_meta_error_envelope(data["error"])
+        return data
+
+    def get_campaign(
+        self,
+        campaign_id: str,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Perform read-only query to retrieve current remote campaign metadata."""
+        clean_id = campaign_id.strip() if campaign_id else ""
+        if not clean_id:
+            raise ValueError("campaign_id must not be empty.")
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            raise ValueError("META_ACCESS_TOKEN is required.")
+
+        fields = "id,name,status,effective_status"
+        url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/{clean_id}?fields={fields}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {target_token.strip()}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        text = self._execute_request(req, is_write=False)
+        data = self._parse_json_dict(text)
+        if "error" in data and isinstance(data["error"], dict):
+            self._handle_meta_error_envelope(data["error"])
+        return data
+
