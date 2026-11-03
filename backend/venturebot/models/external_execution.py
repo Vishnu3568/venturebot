@@ -35,6 +35,7 @@ class ExternalExecutionEventType(str, Enum):
     READINESS_CHECKED = "readiness_checked"
     ACTIVATION_AUTHORIZED = "activation_authorized"
     ACTIVATED = "activated"
+    ACTIVATION_FAILED = "activation_failed"
     DELIVERY_VERIFIED = "delivery_verified"
     EMERGENCY_STOP = "emergency_stop"
 
