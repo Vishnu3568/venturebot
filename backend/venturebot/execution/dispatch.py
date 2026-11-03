@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -10,7 +10,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from venturebot.database.models import ExperimentORM, OpportunityORM
@@ -31,7 +31,12 @@ from venturebot.execution.meta import (
 )
 from venturebot.execution.service import ExperimentExecutionService
 from venturebot.models.experiment import Experiment, ExperimentStatus
-from venturebot.models.external_execution import ExternalExecution, ExternalExecutionStatus
+from venturebot.models.external_execution import (
+    ExternalExecution,
+    ExternalExecutionEvent,
+    ExternalExecutionEventType,
+    ExternalExecutionStatus,
+)
 
 
 class ExecutionAction(str, Enum):
@@ -326,6 +331,1265 @@ class ExecutionDispatchService:
             auto_commit=auto_commit,
         )
 
+    @classmethod
+    def deploy_recovery_dormant(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        spec: MetaExecutionSpecification,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+        version: int = 2,
+        auto_commit: bool = True,
+    ) -> RecoveryDormantResult:
+        """Phase 1: Deploy dormant replacement ad set, creative, and ad under existing campaign.
+
+        Invariants:
+        1. SAFE_MODE must be False (explicitly un-gated for authorized execution).
+        2. Explicit operator authorization is required.
+        3. Experiment must exist and be in APPROVED status.
+        4. Actual spend on financial ledger must be exactly 0.00.
+        5. Allocated capital must be exactly ₹200.00; proposed budget <= allocated.
+        6. Campaign budget sharing (CBO) must be disabled.
+        7. Original expired ad set is preserved as-is (never deleted, modified, or archived).
+        8. Audit event is recorded for superseding the original ad set.
+        9. Replacement ad set is created in PAUSED status with a 24h buffer schedule.
+        10. Creative and Ad are created in PAUSED status.
+        11. Experiment status remains APPROVED (actual_start remains None).
+        """
+        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
+        if effective_safe_mode:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="SAFE_MODE_ENABLED",
+                experiment_id=experiment_id,
+            )
+
+        if not explicit_auth:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="EXPLICIT_AUTHORIZATION_REQUIRED",
+                experiment_id=experiment_id,
+            )
+
+        exp_orm = session.get(ExperimentORM, experiment_id)
+        if exp_orm is None:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="EXPERIMENT_NOT_FOUND",
+                experiment_id=experiment_id,
+            )
+
+        if exp_orm.status != ExperimentStatus.APPROVED.value:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Experiment in '{exp_orm.status}' status; expected APPROVED",
+                experiment_id=experiment_id,
+            )
+
+        cap_repo = CapitalRepository(session, auto_commit=False)
+        actual_spend = cap_repo.get_experiment_actual_spend(experiment_id)
+        if actual_spend > Decimal("0.00"):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="ACTUAL_SPEND_EXCEEDS_ZERO",
+                experiment_id=experiment_id,
+            )
+
+        if exp_orm.allocated_budget != Decimal("200.00"):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Allocated budget is {exp_orm.allocated_budget}, expected 200.00",
+                experiment_id=experiment_id,
+            )
+
+        if spec.authorized_budget > exp_orm.allocated_budget:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="AUTHORIZED_BUDGET_EXCEEDS_ALLOCATION",
+                experiment_id=experiment_id,
+            )
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None or not execution.campaign_id or not execution.image_hash:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="MISSING_EXISTING_CAMPAIGN_OR_IMAGE",
+                experiment_id=experiment_id,
+            )
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=spec.ad_account_id)
+
+        try:
+            if adapter.get_campaign_budget_sharing(execution.campaign_id):
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason="CAMPAIGN_BUDGET_SHARING_NOT_ALLOWED",
+                    experiment_id=experiment_id,
+                )
+        except Exception as e:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Failed to verify campaign budget sharing: {_sanitize_error(str(e))}",
+                experiment_id=experiment_id,
+            )
+
+        # Record superseding of the original ad set if present (do not archive or delete remote object)
+        old_adset_id = execution.adset_id
+        if old_adset_id:
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+                    tier="adset",
+                    old_resource_id=old_adset_id,
+                    new_resource_id=None,
+                    reason=f"Original ad set {old_adset_id} superseded by versioned ADSET-v{version} for fresh 48h flight",
+                )
+            )
+
+        # Replacement Ad Set
+        replacement_name = deterministic_adset_name(experiment_id, version=version)
+        new_adset_id: str | None = None
+        adset_lookup = adapter.lookup_adset(
+            campaign_id=execution.campaign_id,
+            adset_name=replacement_name,
+            expected_lifetime_budget_paise=inr_to_paise(spec.authorized_budget),
+        )
+
+        if adset_lookup.status == ReconciliationStatus.FOUND_EXACT:
+            new_adset_id = adset_lookup.resource_id
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+                    tier="adset",
+                    old_resource_id=None,
+                    new_resource_id=new_adset_id,
+                    reason="Adopted existing replacement ad set",
+                )
+            )
+        elif adset_lookup.status == ReconciliationStatus.NOT_FOUND:
+            now_utc = datetime.now(timezone.utc)
+            buffer_start = now_utc + timedelta(hours=24)
+            buffer_end = buffer_start + timedelta(hours=48)
+            try:
+                new_adset_id = adapter.create_adset(
+                    campaign_id=execution.campaign_id,
+                    name=replacement_name,
+                    lifetime_budget_paise=inr_to_paise(spec.authorized_budget),
+                    end_time=buffer_end,
+                    start_time=buffer_start,
+                    countries=spec.countries,
+                    age_min=spec.age_min,
+                    age_max=spec.age_max,
+                    status="PAUSED",
+                    ad_account_id=spec.ad_account_id,
+                )
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+                        tier="adset",
+                        old_resource_id=None,
+                        new_resource_id=new_adset_id,
+                        reason="Created dormant replacement ad set with 24h buffer schedule",
+                    )
+                )
+            except Exception as e:
+                execution.status = ExternalExecutionStatus.FAILED
+                execution.last_error = f"Error creating replacement ad set: {_sanitize_error(str(e))}"
+                execution = exec_repo.save(execution)
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=False,
+                    reason=execution.last_error,
+                    experiment_id=experiment_id,
+                    execution=execution,
+                )
+        else:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Ambiguous or unknown replacement ad set state: {adset_lookup.error_message}",
+                experiment_id=experiment_id,
+            )
+
+        execution.adset_id = new_adset_id
+        execution.status = ExternalExecutionStatus.PARTIAL_ADSET
+        execution.last_error = None
+        execution = exec_repo.save(execution)
+
+        # Creative Tier
+        if not execution.creative_id:
+            creative_name = deterministic_creative_name(experiment_id)
+            c_lookup = adapter.lookup_creative(
+                creative_name=creative_name,
+                page_id=spec.page_id,
+                image_hash=execution.image_hash or "",
+                destination_url=spec.destination_url,
+                ad_account_id=spec.ad_account_id,
+            )
+            if c_lookup.status == ReconciliationStatus.FOUND_EXACT:
+                execution.creative_id = c_lookup.resource_id
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+                        tier="creative",
+                        old_resource_id=None,
+                        new_resource_id=execution.creative_id,
+                        reason="Adopted existing creative",
+                    )
+                )
+            elif c_lookup.status == ReconciliationStatus.NOT_FOUND:
+                try:
+                    c_id = adapter.create_creative(
+                        name=creative_name,
+                        page_id=spec.page_id,
+                        link=spec.destination_url,
+                        message=spec.primary_text,
+                        headline=spec.headline,
+                        image_hash=execution.image_hash or "",
+                        call_to_action=spec.call_to_action,
+                        ad_account_id=spec.ad_account_id,
+                    )
+                    execution.creative_id = c_id
+                    exec_repo.record_event(
+                        ExternalExecutionEvent(
+                            execution_id=execution.id,
+                            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+                            tier="creative",
+                            old_resource_id=None,
+                            new_resource_id=c_id,
+                            reason="Created ad creative in Live Mode",
+                        )
+                    )
+                except Exception as e:
+                    execution.status = ExternalExecutionStatus.FAILED
+                    execution.last_error = f"Error creating creative: {_sanitize_error(str(e))}"
+                    execution = exec_repo.save(execution)
+                    return RecoveryDormantResult(
+                        success=False,
+                        blocked=False,
+                        reason=execution.last_error,
+                        experiment_id=experiment_id,
+                        execution=execution,
+                        adset_id=execution.adset_id,
+                    )
+            else:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"Ambiguous creative lookup: {c_lookup.error_message}",
+                    experiment_id=experiment_id,
+                    execution=execution,
+                    adset_id=execution.adset_id,
+                )
+
+            execution.status = ExternalExecutionStatus.PARTIAL_CREATIVE
+            execution.last_error = None
+            execution = exec_repo.save(execution)
+
+        # Ad Tier
+        if not execution.ad_id:
+            ad_name = deterministic_ad_name(experiment_id)
+            ad_lookup = adapter.lookup_ad(
+                adset_id=execution.adset_id,  # type: ignore[arg-type]
+                ad_name=ad_name,
+                creative_id=execution.creative_id,  # type: ignore[arg-type]
+            )
+            if ad_lookup.status == ReconciliationStatus.FOUND_EXACT:
+                execution.ad_id = ad_lookup.resource_id
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+                        tier="ad",
+                        old_resource_id=None,
+                        new_resource_id=execution.ad_id,
+                        reason="Adopted existing ad",
+                    )
+                )
+            elif ad_lookup.status == ReconciliationStatus.NOT_FOUND:
+                try:
+                    ad_id = adapter.create_ad(
+                        name=ad_name,
+                        adset_id=execution.adset_id,  # type: ignore[arg-type]
+                        creative_id=execution.creative_id,  # type: ignore[arg-type]
+                        status="PAUSED",
+                        ad_account_id=spec.ad_account_id,
+                    )
+                    execution.ad_id = ad_id
+                    exec_repo.record_event(
+                        ExternalExecutionEvent(
+                            execution_id=execution.id,
+                            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+                            tier="ad",
+                            old_resource_id=None,
+                            new_resource_id=ad_id,
+                            reason="Created ad in PAUSED status for policy review",
+                        )
+                    )
+                except Exception as e:
+                    execution.status = ExternalExecutionStatus.FAILED
+                    execution.last_error = f"Error creating ad: {_sanitize_error(str(e))}"
+                    execution = exec_repo.save(execution)
+                    return RecoveryDormantResult(
+                        success=False,
+                        blocked=False,
+                        reason=execution.last_error,
+                        experiment_id=experiment_id,
+                        execution=execution,
+                        adset_id=execution.adset_id,
+                        creative_id=execution.creative_id,
+                    )
+            else:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"Ambiguous ad lookup: {ad_lookup.error_message}",
+                    experiment_id=experiment_id,
+                    execution=execution,
+                    adset_id=execution.adset_id,
+                    creative_id=execution.creative_id,
+                )
+
+            execution.status = ExternalExecutionStatus.DEPLOYED_DORMANT
+            execution.last_error = None
+            execution = exec_repo.save(execution)
+
+        return RecoveryDormantResult(
+            success=True,
+            experiment_id=experiment_id,
+            execution=execution,
+            adset_id=execution.adset_id,
+            creative_id=execution.creative_id,
+            ad_id=execution.ad_id,
+        )
+
+    @classmethod
+    def verify_readiness(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        adapter: MetaMarketingApiAdapter | None = None,
+    ) -> ReadinessResult:
+        """Phase 2a: Read-only verification of ad review status and readiness."""
+        exec_repo = ExternalExecutionRepository(session)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        blockers: list[str] = []
+
+        if execution is None or not execution.ad_id or not execution.adset_id:
+            return ReadinessResult(
+                is_ready=False,
+                ad_approved=False,
+                ad_status="UNKNOWN",
+                effective_status="UNKNOWN",
+                schedule_is_future=False,
+                cbo_disabled=False,
+                blockers=["DEPLOYMENT_INCOMPLETE"],
+            )
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=execution.external_account_id)
+
+        try:
+            ad_info = adapter.get_ad_review_status(execution.ad_id)
+        except Exception as e:
+            return ReadinessResult(
+                is_ready=False,
+                ad_approved=False,
+                ad_status="ERROR",
+                effective_status="ERROR",
+                schedule_is_future=False,
+                cbo_disabled=False,
+                blockers=[f"Failed to fetch ad review status: {_sanitize_error(str(e))}"],
+            )
+
+        try:
+            adset_info = adapter.get_adset(execution.adset_id)
+        except Exception as e:
+            return ReadinessResult(
+                is_ready=False,
+                ad_approved=ad_info["is_approved"],
+                ad_status=ad_info["status"],
+                effective_status=ad_info["effective_status"],
+                schedule_is_future=False,
+                cbo_disabled=False,
+                blockers=[f"Failed to fetch ad set schedule: {_sanitize_error(str(e))}"],
+            )
+
+        start_time_raw = adset_info.get("start_time")
+        schedule_future = False
+        if start_time_raw:
+            try:
+                # Parse ISO-8601 string
+                clean_time = start_time_raw.replace("Z", "+00:00")
+                st = datetime.fromisoformat(clean_time)
+                schedule_future = st > datetime.now(timezone.utc)
+            except Exception:
+                schedule_future = False
+
+        if not schedule_future:
+            blockers.append("SCHEDULE_NOT_IN_FUTURE")
+        if not ad_info["is_approved"]:
+            blockers.append("AD_NOT_APPROVED")
+
+        cbo_disabled = not adapter.get_campaign_budget_sharing(execution.campaign_id or "")
+        if not cbo_disabled:
+            blockers.append("CBO_ENABLED")
+
+        is_ready = len(blockers) == 0
+        exec_repo.record_event(
+            ExternalExecutionEvent(
+                execution_id=execution.id,
+                event_type=ExternalExecutionEventType.READINESS_CHECKED.value,
+                tier="orchestration",
+                reason=f"Readiness check completed: is_ready={is_ready}, blockers={blockers}",
+            )
+        )
+
+        return ReadinessResult(
+            is_ready=is_ready,
+            ad_approved=ad_info["is_approved"],
+            ad_status=ad_info["status"],
+            effective_status=ad_info["effective_status"],
+            schedule_is_future=schedule_future,
+            cbo_disabled=cbo_disabled,
+            blockers=blockers,
+        )
+
+    @classmethod
+    def lock_schedule(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        target_start: datetime,
+        target_end: datetime,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+    ) -> ScheduleLockResult:
+        """Phase 2b: Lock an exact 48.0-hour schedule prior to live activation."""
+        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
+        if effective_safe_mode:
+            return ScheduleLockResult(success=False, blocked=True, reason="SAFE_MODE_ENABLED")
+
+        if not explicit_auth:
+            return ScheduleLockResult(success=False, blocked=True, reason="EXPLICIT_AUTHORIZATION_REQUIRED")
+
+        now_utc = datetime.now(timezone.utc)
+        if target_start.tzinfo is None or target_end.tzinfo is None:
+            return ScheduleLockResult(success=False, blocked=True, reason="TIMESTAMPS_MUST_BE_TIMEZONE_AWARE")
+
+        if target_start <= now_utc:
+            return ScheduleLockResult(success=False, blocked=True, reason="TARGET_START_MUST_BE_IN_FUTURE")
+
+        duration = target_end - target_start
+        if duration != timedelta(hours=48):
+            return ScheduleLockResult(
+                success=False,
+                blocked=True,
+                reason=f"Schedule duration must be exactly 48 hours; got {duration.total_seconds() / 3600.0}h",
+            )
+
+        exec_repo = ExternalExecutionRepository(session)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None or not execution.adset_id:
+            return ScheduleLockResult(success=False, blocked=True, reason="ADSET_NOT_FOUND")
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=execution.external_account_id)
+
+        try:
+            adapter.update_adset_schedule(execution.adset_id, start_time=target_start, end_time=target_end)
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.SCHEDULE_LOCKED.value,
+                    tier="adset",
+                    new_resource_id=execution.adset_id,
+                    reason=f"Locked exact 48.0h schedule: {target_start.isoformat()} to {target_end.isoformat()}",
+                )
+            )
+            return ScheduleLockResult(
+                success=True,
+                start_time=target_start,
+                end_time=target_end,
+                duration_hours=48.0,
+            )
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            return ScheduleLockResult(
+                success=False,
+                blocked=False,
+                reason=f"Error locking schedule on Meta: {safe_err}",
+            )
+
+    @classmethod
+    def activate_recovery_flight(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+        original_adset_id: str | None = None,
+        auto_commit: bool = True,
+    ) -> ActivationResult:
+        """Phase 2c: Explicitly activate Campaign, Replacement Ad Set, and Replacement Ad.
+
+        Invariants:
+        1. SAFE_MODE must be False (explicitly un-gated for authorized activation).
+        2. Explicit human operator authorization is strictly required.
+        3. Experiment must exist and be in APPROVED status.
+        4. Actual spend on financial ledger must be exactly ₹0.00.
+        5. Allocated budget must be exactly ₹200.00.
+        6. Replacement ad must be verified as APPROVED by Meta ad review.
+        7. Replacement ad set schedule must be verified as in the future and exactly 48.0h.
+        8. Replacement ad set must NOT be the original expired ad set (original preserved PAUSED).
+        9. Sequential activation:
+           a. Campaign: unpause -> verify ACTIVE.
+           b. Replacement Ad Set: unpause -> verify ACTIVE.
+           c. Replacement Ad: unpause -> verify ACTIVE.
+        10. Verify original ad set remains PAUSED.
+        11. All status transitions recorded immutably in ExternalExecutionEvent.
+        12. Retries are idempotent. Partial activation returns is_partially_activated=True.
+        13. Does NOT mark experiment RUNNING (remains APPROVED until impressions/spend verified).
+        """
+        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
+        if effective_safe_mode:
+            return ActivationResult(success=False, blocked=True, reason="SAFE_MODE_ENABLED")
+
+        if not explicit_auth:
+            return ActivationResult(success=False, blocked=True, reason="EXPLICIT_AUTHORIZATION_REQUIRED")
+
+        exp_orm = session.get(ExperimentORM, experiment_id)
+        if exp_orm is None:
+            return ActivationResult(success=False, blocked=True, reason="EXPERIMENT_NOT_FOUND")
+
+        if exp_orm.status != ExperimentStatus.APPROVED.value:
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason=f"Experiment in '{exp_orm.status}' status; expected APPROVED",
+            )
+
+        cap_repo = CapitalRepository(session, auto_commit=False)
+        actual_spend = cap_repo.get_experiment_actual_spend(experiment_id)
+        if actual_spend > Decimal("0.00"):
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason="ACTUAL_SPEND_EXCEEDS_ZERO",
+            )
+
+        if exp_orm.allocated_budget != Decimal("200.00"):
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason=f"Allocated budget is {exp_orm.allocated_budget}, expected 200.00",
+            )
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None or not execution.adset_id:
+            return ActivationResult(success=False, blocked=True, reason="ADSET_NOT_FOUND")
+        if not execution.ad_id:
+            return ActivationResult(success=False, blocked=True, reason="AD_NOT_FOUND")
+        if not execution.campaign_id:
+            return ActivationResult(success=False, blocked=True, reason="CAMPAIGN_NOT_FOUND")
+
+        # Guard: Ensure we have verified original ad set lineage and never activate it
+        superseded_events = [
+            e for e in exec_repo.get_events(execution.id)
+            if e.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value
+        ]
+        orig_id = original_adset_id or (superseded_events[0].old_resource_id if superseded_events else None)
+        if not orig_id:
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason="ORIGINAL_ADSET_LINEAGE_NOT_VERIFIED",
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+            )
+
+        if execution.adset_id == orig_id:
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason="CANNOT_ACTIVATE_SUPERSEDED_ORIGINAL_ADSET",
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+            )
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=execution.external_account_id)
+
+        # Pre-activation check 1: Meta ad review approval
+        try:
+            review_status = adapter.get_ad_review_status(execution.ad_id)
+            if not review_status.get("is_approved", False):
+                eff = review_status.get("effective_status", "UNKNOWN")
+                return ActivationResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"AD_NOT_APPROVED: effective_status={eff}",
+                    campaign_id=execution.campaign_id,
+                    adset_id=execution.adset_id,
+                    ad_id=execution.ad_id,
+                )
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            return ActivationResult(
+                success=False,
+                blocked=False,
+                reason=f"Failed to verify ad review status: {safe_err}",
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+            )
+
+        # Pre-activation check 2: Future 48.0-hour schedule
+        try:
+            adset_meta = adapter.get_adset(execution.adset_id)
+            st_str = adset_meta.get("start_time")
+            et_str = adset_meta.get("end_time")
+            if not st_str or not et_str:
+                return ActivationResult(
+                    success=False,
+                    blocked=True,
+                    reason="SCHEDULE_NOT_CONFIGURED",
+                    campaign_id=execution.campaign_id,
+                    adset_id=execution.adset_id,
+                    ad_id=execution.ad_id,
+                )
+            st = datetime.fromisoformat(st_str.replace("Z", "+00:00"))
+            et = datetime.fromisoformat(et_str.replace("Z", "+00:00"))
+            now_utc = datetime.now(timezone.utc)
+            if et <= now_utc:
+                return ActivationResult(
+                    success=False,
+                    blocked=True,
+                    reason="SCHEDULE_EXPIRED",
+                    campaign_id=execution.campaign_id,
+                    adset_id=execution.adset_id,
+                    ad_id=execution.ad_id,
+                )
+            duration_hrs = (et - st).total_seconds() / 3600.0
+            if abs(duration_hrs - 48.0) > 0.05:
+                return ActivationResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"SCHEDULE_DURATION_INVALID: {duration_hrs:.2f}h expected 48.0h",
+                    campaign_id=execution.campaign_id,
+                    adset_id=execution.adset_id,
+                    ad_id=execution.ad_id,
+                )
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            return ActivationResult(
+                success=False,
+                blocked=False,
+                reason=f"Failed to verify ad set schedule: {safe_err}",
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+            )
+
+        # Pre-activation check 3: Original ad set invariant verification (BEFORE any activation calls)
+        try:
+            orig_meta = adapter.get_adset(orig_id)
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.ACTIVATION_FAILED.value,
+                    tier="adset",
+                    old_resource_id=orig_id,
+                    reason=f"Failed to inspect original ad set invariant: {safe_err}",
+                )
+            )
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason=f"ORIGINAL_ADSET_INSPECTION_FAILED: {safe_err}",
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+            )
+
+        orig_status = str(orig_meta.get("status", "")).upper()
+        if orig_status == "ACTIVE":
+            pause_err = None
+            try:
+                adapter.pause_adset(orig_id)
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                        tier="adset",
+                        new_resource_id=orig_id,
+                        reason="Original ad set was unexpectedly ACTIVE; emergency re-paused",
+                    )
+                )
+            except Exception as pe:
+                pause_err = _sanitize_error(str(pe))
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                        tier="adset",
+                        new_resource_id=orig_id,
+                        reason=f"Original ad set was unexpectedly ACTIVE; emergency re-pause failed: {pause_err}",
+                    )
+                )
+
+            reason_msg = "ORIGINAL_ADSET_UNEXPECTEDLY_ACTIVE"
+            if pause_err:
+                reason_msg = f"ORIGINAL_ADSET_UNEXPECTEDLY_ACTIVE: Emergency re-pause failed: {pause_err}"
+
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason=reason_msg,
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+                is_partially_activated=False,
+            )
+
+        campaign_id = execution.campaign_id
+        adset_id = execution.adset_id
+        ad_id = execution.ad_id
+
+        campaign_status = "UNKNOWN"
+        adset_status = "UNKNOWN"
+        ad_status = "UNKNOWN"
+
+        # Tier 1: Campaign activation
+        try:
+            camp_meta = adapter.get_campaign(campaign_id)
+            campaign_status = camp_meta.get("status", "PAUSED")
+            if campaign_status != "ACTIVE":
+                adapter.unpause_campaign(campaign_id)
+                camp_meta_after = adapter.get_campaign(campaign_id)
+                campaign_status = camp_meta_after.get("status", "ACTIVE")
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.ACTIVATED.value,
+                        tier="campaign",
+                        new_resource_id=campaign_id,
+                        reason="Campaign explicitly activated for recovery flight",
+                    )
+                )
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.ACTIVATION_FAILED.value,
+                    tier="campaign",
+                    new_resource_id=campaign_id,
+                    reason=f"Failed to unpause campaign: {safe_err}",
+                )
+            )
+            return ActivationResult(
+                success=False,
+                blocked=False,
+                reason=f"Failed to unpause campaign: {safe_err}",
+                campaign_id=campaign_id,
+                campaign_status=campaign_status,
+                adset_id=adset_id,
+                adset_status=adset_status,
+                ad_id=ad_id,
+                ad_status=ad_status,
+                is_partially_activated=False,
+            )
+
+        # Tier 2: Replacement Ad Set activation
+        try:
+            adset_meta = adapter.get_adset(adset_id)
+            adset_status = adset_meta.get("status", "PAUSED")
+            if adset_status != "ACTIVE":
+                adapter.unpause_adset(adset_id)
+                adset_meta_after = adapter.get_adset(adset_id)
+                adset_status = adset_meta_after.get("status", "ACTIVE")
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.ACTIVATED.value,
+                        tier="adset",
+                        new_resource_id=adset_id,
+                        reason="Replacement ad set explicitly activated for live delivery",
+                    )
+                )
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.ACTIVATION_FAILED.value,
+                    tier="adset",
+                    new_resource_id=adset_id,
+                    reason=f"Failed to unpause ad set: {safe_err}",
+                )
+            )
+            return ActivationResult(
+                success=False,
+                blocked=False,
+                reason=f"Failed to unpause ad set: {safe_err}",
+                campaign_id=campaign_id,
+                campaign_status=campaign_status,
+                adset_id=adset_id,
+                adset_status=adset_status,
+                ad_id=ad_id,
+                ad_status=ad_status,
+                is_partially_activated=(campaign_status == "ACTIVE"),
+            )
+
+        # Tier 3: Replacement Ad activation
+        try:
+            current_ad_meta = adapter.get_ad(ad_id)
+            ad_status = current_ad_meta.get("status", "PAUSED")
+            if ad_status != "ACTIVE":
+                adapter.unpause_ad(ad_id)
+                ad_meta_after = adapter.get_ad(ad_id)
+                ad_status = ad_meta_after.get("status", "ACTIVE")
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.ACTIVATED.value,
+                        tier="ad",
+                        new_resource_id=ad_id,
+                        reason="Replacement ad explicitly activated for live delivery",
+                    )
+                )
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.ACTIVATION_FAILED.value,
+                    tier="ad",
+                    new_resource_id=ad_id,
+                    reason=f"Failed to unpause ad: {safe_err}",
+                )
+            )
+            return ActivationResult(
+                success=False,
+                blocked=False,
+                reason=f"Failed to unpause ad: {safe_err}",
+                campaign_id=campaign_id,
+                campaign_status=campaign_status,
+                adset_id=adset_id,
+                adset_status=adset_status,
+                ad_id=ad_id,
+                ad_status=ad_status,
+                is_partially_activated=(campaign_status == "ACTIVE" or adset_status == "ACTIVE"),
+            )
+
+        # Final verification: All three tiers must be ACTIVE
+        if campaign_status == "ACTIVE" and adset_status == "ACTIVE" and ad_status == "ACTIVE":
+            execution.status = ExternalExecutionStatus.ACTIVATED
+            execution = exec_repo.save(execution)
+            return ActivationResult(
+                success=True,
+                campaign_id=campaign_id,
+                campaign_status=campaign_status,
+                adset_id=adset_id,
+                adset_status=adset_status,
+                ad_id=ad_id,
+                ad_status=ad_status,
+                is_partially_activated=False,
+            )
+        else:
+            return ActivationResult(
+                success=False,
+                blocked=False,
+                reason="Activation verification failed: one or more tiers did not reach ACTIVE status",
+                campaign_id=campaign_id,
+                campaign_status=campaign_status,
+                adset_id=adset_id,
+                adset_status=adset_status,
+                ad_id=ad_id,
+                ad_status=ad_status,
+                is_partially_activated=True,
+            )
+
+    @classmethod
+    def verify_delivery_started(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        impressions: int = 0,
+        spend: Decimal = Decimal("0.00"),
+        adapter: MetaMarketingApiAdapter | None = None,
+        auto_commit: bool = True,
+    ) -> DeliveryVerificationResult:
+        """Phase 2d: Mark experiment RUNNING only when actual ad delivery is verified."""
+        exp_orm = session.get(ExperimentORM, experiment_id)
+        if exp_orm is None:
+            return DeliveryVerificationResult(
+                delivery_started=False,
+                experiment_status="UNKNOWN",
+                reason="EXPERIMENT_NOT_FOUND",
+            )
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None:
+            return DeliveryVerificationResult(
+                delivery_started=False,
+                experiment_status=exp_orm.status,
+                reason="EXECUTION_RECORD_NOT_FOUND",
+            )
+
+        # Enforce that execution must have been explicitly ACTIVATED before delivery can be verified
+        if execution.status not in (ExternalExecutionStatus.ACTIVATED, ExternalExecutionStatus.DEPLOYED):
+            return DeliveryVerificationResult(
+                delivery_started=False,
+                experiment_status=exp_orm.status,
+                reason=f"Execution status is '{execution.status}'; must be ACTIVATED before delivery can be verified",
+            )
+
+        # Delivery verified if impressions > 0 or spend > 0
+        if impressions > 0 or spend > Decimal("0.00"):
+            start_res = ExperimentExecutionService.start(session, experiment_id, auto_commit=auto_commit)
+            if not start_res.is_successful:
+                return DeliveryVerificationResult(
+                    delivery_started=False,
+                    experiment_status=exp_orm.status,
+                    reason=f"Failed to transition experiment to RUNNING: {start_res.rejection_reason}",
+                )
+
+            execution.status = ExternalExecutionStatus.DEPLOYED
+            execution = exec_repo.save(execution)
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.DELIVERY_VERIFIED.value,
+                    tier="orchestration",
+                    reason=f"Delivery verified: impressions={impressions}, spend={spend}",
+                )
+            )
+            return DeliveryVerificationResult(
+                delivery_started=True,
+                experiment_status=ExperimentStatus.RUNNING.value,
+                actual_start=exp_orm.actual_start,
+                impressions=impressions,
+                spend=spend,
+            )
+
+        return DeliveryVerificationResult(
+            delivery_started=False,
+            experiment_status=exp_orm.status,
+            impressions=impressions,
+            spend=spend,
+            reason="NO_IMPRESSIONS_OR_SPEND_RECORDED_YET",
+        )
+
+    @classmethod
+    def emergency_pause_adset(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+        original_adset_id: str | None = None,
+        auto_commit: bool = True,
+    ) -> EmergencyStopResult:
+        """Coordinated multi-tier emergency stop for an experiment's external Meta resources.
+
+        Pause order:
+        1. Parent campaign (if ownership verified exclusively to this experiment).
+        2. Replacement ad.
+        3. Replacement ad set.
+        4. Original ad set (if active or invariant violated).
+
+        Performs read-back verification on all targets. Never silently swallows exceptions.
+        """
+        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
+        if effective_safe_mode:
+            return EmergencyStopResult(
+                is_successful=False,
+                experiment_id=experiment_id,
+                rejection_reason="SAFE_MODE_ENABLED",
+            )
+
+        if not explicit_auth:
+            return EmergencyStopResult(
+                is_successful=False,
+                experiment_id=experiment_id,
+                rejection_reason="EXPLICIT_AUTHORIZATION_REQUIRED",
+            )
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None or not execution.adset_id:
+            return EmergencyStopResult(
+                is_successful=False,
+                experiment_id=experiment_id,
+                rejection_reason="ADSET_NOT_FOUND",
+            )
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=execution.external_account_id)
+
+        superseded_events = [
+            e for e in exec_repo.get_events(execution.id)
+            if e.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value
+        ]
+        orig_id = original_adset_id or (superseded_events[0].old_resource_id if superseded_events else None)
+
+        unresolved_scopes: list[str] = []
+        camp_status: ResourcePauseStatus | None = None
+        ad_status: ResourcePauseStatus | None = None
+        adset_status: ResourcePauseStatus | None = None
+        orig_status: ResourcePauseStatus | None = None
+
+        # Tier 1: Parent Campaign (verify exclusive ownership before pausing)
+        if execution.campaign_id:
+            camp_status = ResourcePauseStatus(
+                resource_type="campaign",
+                resource_id=execution.campaign_id,
+            )
+            camp_ownership_verified = False
+            try:
+                camp_meta = adapter.get_campaign(execution.campaign_id)
+                camp_name = str(camp_meta.get("name", ""))
+                expected_prefix = f"VB-EXP-{experiment_id}"
+                if camp_name.startswith(expected_prefix):
+                    camp_ownership_verified = True
+                else:
+                    unresolved_scopes.append(
+                        f"Campaign '{execution.campaign_id}' ownership unverified: name '{camp_name}' does not match expected prefix '{expected_prefix}'"
+                    )
+                    camp_status.error = "Ownership unverified"
+            except Exception as e:
+                safe_err = _sanitize_error(str(e))
+                unresolved_scopes.append(
+                    f"Campaign '{execution.campaign_id}' ownership check failed: {safe_err}"
+                )
+                camp_status.error = f"Ownership check failed: {safe_err}"
+
+            if camp_ownership_verified:
+                camp_status.attempted = True
+                try:
+                    adapter.pause_campaign(execution.campaign_id)
+                    camp_status.paused = True
+                    exec_repo.record_event(
+                        ExternalExecutionEvent(
+                            execution_id=execution.id,
+                            event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                            tier="campaign",
+                            new_resource_id=execution.campaign_id,
+                            reason="Emergency pause executed on campaign",
+                        )
+                    )
+                    camp_rb = adapter.get_campaign(execution.campaign_id)
+                    if str(camp_rb.get("status", "")).upper() == "PAUSED":
+                        camp_status.verified = True
+                    else:
+                        camp_status.verified = False
+                        camp_status.error = f"Read-back status is {camp_rb.get('status')}, expected PAUSED"
+                except Exception as e:
+                    safe_err = _sanitize_error(str(e))
+                    camp_status.error = safe_err
+                    exec_repo.record_event(
+                        ExternalExecutionEvent(
+                            execution_id=execution.id,
+                            event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                            tier="campaign",
+                            new_resource_id=execution.campaign_id,
+                            reason=f"Emergency pause failed on campaign: {safe_err}",
+                        )
+                    )
+
+        # Tier 2: Replacement Ad
+        if execution.ad_id:
+            ad_status = ResourcePauseStatus(
+                resource_type="ad",
+                resource_id=execution.ad_id,
+                attempted=True,
+            )
+            try:
+                adapter.pause_ad(execution.ad_id)
+                ad_status.paused = True
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                        tier="ad",
+                        new_resource_id=execution.ad_id,
+                        reason="Emergency pause executed on active ad",
+                    )
+                )
+                ad_rb = adapter.get_ad(execution.ad_id)
+                if str(ad_rb.get("status", "")).upper() == "PAUSED":
+                    ad_status.verified = True
+                else:
+                    ad_status.verified = False
+                    ad_status.error = f"Read-back status is {ad_rb.get('status')}, expected PAUSED"
+            except Exception as e:
+                safe_err = _sanitize_error(str(e))
+                ad_status.error = safe_err
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                        tier="ad",
+                        new_resource_id=execution.ad_id,
+                        reason=f"Emergency pause failed on ad: {safe_err}",
+                    )
+                )
+
+        # Tier 3: Replacement Ad Set
+        adset_status = ResourcePauseStatus(
+            resource_type="adset",
+            resource_id=execution.adset_id,
+            attempted=True,
+        )
+        try:
+            adapter.pause_adset(execution.adset_id)
+            adset_status.paused = True
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                    tier="adset",
+                    new_resource_id=execution.adset_id,
+                    reason="Emergency pause executed on active ad set",
+                )
+            )
+            adset_rb = adapter.get_adset(execution.adset_id)
+            if str(adset_rb.get("status", "")).upper() == "PAUSED":
+                adset_status.verified = True
+            else:
+                adset_status.verified = False
+                adset_status.error = f"Read-back status is {adset_rb.get('status')}, expected PAUSED"
+        except Exception as e:
+            safe_err = _sanitize_error(str(e))
+            adset_status.error = safe_err
+            exec_repo.record_event(
+                ExternalExecutionEvent(
+                    execution_id=execution.id,
+                    event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                    tier="adset",
+                    new_resource_id=execution.adset_id,
+                    reason=f"Emergency pause failed on ad set: {safe_err}",
+                )
+            )
+
+        # Tier 4: Original Ad Set (if superseded)
+        if orig_id and orig_id != execution.adset_id:
+            orig_status = ResourcePauseStatus(
+                resource_type="original_adset",
+                resource_id=orig_id,
+            )
+            try:
+                orig_meta = adapter.get_adset(orig_id)
+                current_orig_status = str(orig_meta.get("status", "")).upper()
+                if current_orig_status == "ACTIVE":
+                    orig_status.attempted = True
+                    adapter.pause_adset(orig_id)
+                    orig_status.paused = True
+                    exec_repo.record_event(
+                        ExternalExecutionEvent(
+                            execution_id=execution.id,
+                            event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                            tier="adset",
+                            new_resource_id=orig_id,
+                            reason="Original ad set was ACTIVE; paused during emergency stop",
+                        )
+                    )
+                    orig_rb = adapter.get_adset(orig_id)
+                    if str(orig_rb.get("status", "")).upper() == "PAUSED":
+                        orig_status.verified = True
+                    else:
+                        orig_status.verified = False
+                        orig_status.error = f"Read-back status is {orig_rb.get('status')}, expected PAUSED"
+                else:
+                    # Already PAUSED
+                    orig_status.paused = True
+                    orig_status.verified = True
+            except Exception as e:
+                safe_err = _sanitize_error(str(e))
+                orig_status.error = safe_err
+                exec_repo.record_event(
+                    ExternalExecutionEvent(
+                        execution_id=execution.id,
+                        event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+                        tier="adset",
+                        new_resource_id=orig_id,
+                        reason=f"Emergency pause / check failed on original ad set: {safe_err}",
+                    )
+                )
+
+        failures = []
+        if camp_status and not camp_status.verified:
+            failures.append(f"Campaign {execution.campaign_id}: {camp_status.error or 'not verified'}")
+        if ad_status and not ad_status.verified:
+            failures.append(f"Ad {execution.ad_id}: {ad_status.error or 'not verified'}")
+        if adset_status and not adset_status.verified:
+            failures.append(f"AdSet {execution.adset_id}: {adset_status.error or 'not verified'}")
+        if orig_status and not orig_status.verified:
+            failures.append(f"Original AdSet {orig_id}: {orig_status.error or 'not verified'}")
+        if unresolved_scopes:
+            failures.extend(unresolved_scopes)
+
+        is_success = len(failures) == 0
+        rejection_reason = f"Emergency stop encountered failures: {'; '.join(failures)}" if failures else None
+
+        return EmergencyStopResult(
+            is_successful=is_success,
+            experiment_id=experiment_id,
+            execution=execution,
+            rejection_reason=rejection_reason,
+            campaign_status=camp_status,
+            ad_status=ad_status,
+            replacement_adset_status=adset_status,
+            original_adset_status=orig_status,
+            unresolved_scopes=unresolved_scopes,
+        )
+
+    @staticmethod
+    def check_spend_thresholds(
+        current_spend: Decimal,
+        allocated_budget: Decimal = Decimal("200.00"),
+    ) -> SpendThresholdStatus:
+        """Evaluate spend monitoring thresholds against the ₹200.00 ceiling."""
+        warn_thresh = Decimal("180.00")
+        breaker_thresh = Decimal("190.00")
+        return SpendThresholdStatus(
+            current_spend=current_spend,
+            allocated_budget=allocated_budget,
+            warning_threshold=warn_thresh,
+            circuit_breaker_threshold=breaker_thresh,
+            is_warning=current_spend >= warn_thresh,
+            is_circuit_breaker_triggered=current_spend >= breaker_thresh,
+        )
+
 
 class DispatchResult(BaseModel):
     """Result of an external Meta experiment dispatch operation."""
@@ -337,6 +1601,17 @@ class DispatchResult(BaseModel):
     rejection_reason: str | None = None
 
 
+class ResourcePauseStatus(BaseModel):
+    """Status of an individual resource pause attempt during emergency stop."""
+
+    resource_type: str  # "campaign", "ad", "adset", "original_adset"
+    resource_id: str
+    attempted: bool = False
+    paused: bool = False
+    verified: bool = False
+    error: str | None = None
+
+
 class EmergencyStopResult(BaseModel):
     """Result of an emergency pause-and-kill coordination operation."""
 
@@ -345,6 +1620,88 @@ class EmergencyStopResult(BaseModel):
     execution: ExternalExecution | None = None
     experiment: Experiment | None = None
     rejection_reason: str | None = None
+    campaign_status: ResourcePauseStatus | None = None
+    ad_status: ResourcePauseStatus | None = None
+    replacement_adset_status: ResourcePauseStatus | None = None
+    original_adset_status: ResourcePauseStatus | None = None
+    unresolved_scopes: list[str] = Field(default_factory=list)
+
+
+class RecoveryDormantResult(BaseModel):
+    """Result of deploying a dormant replacement ad set, creative, and ad."""
+
+    success: bool
+    blocked: bool = False
+    reason: str | None = None
+    experiment_id: UUID
+    execution: ExternalExecution | None = None
+    adset_id: str | None = None
+    creative_id: str | None = None
+    ad_id: str | None = None
+
+
+class ReadinessResult(BaseModel):
+    """Result of verifying Meta ad review and pre-activation readiness."""
+
+    is_ready: bool
+    ad_approved: bool
+    ad_status: str
+    effective_status: str
+    schedule_is_future: bool
+    cbo_disabled: bool
+    blockers: list[str] = []
+
+
+class ScheduleLockResult(BaseModel):
+    """Result of locking a genuine 48-hour schedule before activation."""
+
+    success: bool
+    blocked: bool = False
+    reason: str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    duration_hours: float | None = None
+
+
+class ActivationResult(BaseModel):
+    """Result of explicitly activating a flight across Campaign, Ad Set, and Ad tiers."""
+
+    success: bool
+    blocked: bool = False
+    reason: str | None = None
+    campaign_id: str | None = None
+    campaign_status: str | None = None
+    adset_id: str | None = None
+    adset_status: str | None = None
+    ad_id: str | None = None
+    ad_status: str | None = None
+    is_partially_activated: bool = False
+
+
+class DeliveryVerificationResult(BaseModel):
+    """Result of verifying actual ad delivery start on Meta."""
+
+    delivery_started: bool
+    experiment_status: str
+    actual_start: datetime | None = None
+    impressions: int = 0
+    spend: Decimal = Decimal("0.00")
+    reason: str | None = None
+
+
+class SpendThresholdStatus(BaseModel):
+    """Financial spend monitoring status and circuit-breaker threshold evaluation."""
+
+    current_spend: Decimal
+    allocated_budget: Decimal
+    warning_threshold: Decimal = Decimal("180.00")
+    circuit_breaker_threshold: Decimal = Decimal("190.00")
+    is_warning: bool
+    is_circuit_breaker_triggered: bool
+    disclaimer: str = (
+        "Polling circuit breaker provides best-effort automated pause; "
+        "it is not a real-time hard platform spend guarantee due to reporting latency."
+    )
 
 
 def _sanitize_error(error_msg: str) -> str:
