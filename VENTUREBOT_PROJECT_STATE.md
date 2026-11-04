@@ -56,15 +56,24 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.54 — VentureBot Privacy Policy Implementation (Step 90.2)
+V1.60 — Auditable Recovery Architecture & Security Freeze (Step 90.12.11)
 
 ---
 
 ## Current Status
 
-Step 90.2 — VentureBot Privacy Policy Implemented (Canonical URL: https://vishnu3568.github.io/venturebot/privacy-policy.html)
+Step 90.12.11 Complete — Security Freeze & Canonical Project-State Reconciliation (100% Hermetic Test Verification: 618 passing tests)
 
-- **Step 90.2 Privacy Policy Implementation Summary:**
+- **Step 90.12.1–90.12.11 Recovery & Security Architecture Summary:**
+  - **Option B Architecture:** 2-phase recovery architecture implemented and hardened. Phase 1 deploys replacement resources in `PAUSED` status with a 24-hour buffer schedule under existing campaign `120252176243860380` without touching expired ad set `120252176254130380`. Phase 2 requires Meta ad review approval, explicit human authorization, and locks schedule to exact 48.0h in the future.
+  - **Activation Hardening:** Explicitly activates both replacement ad set and individual ad object in sequence, aborting immediately if the original ad set `120252176254130380` is found `ACTIVE`.
+  - **Multi-Tier Emergency Stop:** Verifies exclusive campaign ownership (`ExternalExecutionRepository.get_by_campaign_id`, exact account ID matching, historical event audit) and pauses all four tiers (Campaign, Ad, Replacement Ad Set, Original Ad Set).
+  - **Lineage Classification:** `classify_execution_lineage` isolates `STANDARD`, `OPTION_B`, and `AMBIGUOUS_RECOVERY`. Incomplete or ambiguous recovery lineage fails closed with zero external mutations, never falling through to legacy campaign-only shutdown.
+  - **Token Preflight Hardening:** `/debug_token` inspection enforces App Access Token credentials, validating App ID `1063651013045060`, compatible type (`SYSTEM_USER`, `USER`), required scopes (`ads_management`, `ads_read`), granular account coverage, data access expiry ($\ge 72\text{h}$), and token expiry. Fails closed without silent self-inspection fallback.
+  - **Trust Boundary Enforcement (Step 90.12.10):** Acknowledged that VentureBot currently lacks a trusted operator authentication/RBAC subsystem. In accordance with Rules A.7 and A.8, caller-supplied operator IDs are treated as unverified, and all recovery versions above 2 remain permanently blocked.
+  - **Test Verification:** 618 tests passing across the repository (107 tests in Option B recovery test suite). Zero live Meta API mutations made. SAFE_MODE=True preserved.
+
+- **Step 90.2 Privacy Policy Implementation Summary (Historical):**
   - **Prerequisite Addressed:** Meta Developer App Production Readiness blocker (Step 90.1) requiring a public Privacy Policy URL for App `1063651013045060`.
   - **Created Public Static Pages:**
     - Root: `privacy-policy.html`
@@ -4667,5 +4676,162 @@ Live execution requires an explicit, separate human launch authorization.
 
 ### Final Classification
 **STEP 90.2 COMPLETE — PRIVACY POLICY READY FOR HUMAN PUBLICATION CHECK**
+
+---
+
+## Step 90.12 — Auditable 2-Phase Meta Recovery Architecture (Option B)
+
+### 1. Architectural Strategy
+- **Core Strategy (Option B):** Rather than mutating the expired original ad set (`120252176254130380`), VentureBot deploys a deterministic, versioned replacement ad set (`VB-EXP-49fde874-9387-5056-934c-51a9cfca164f-ADSET-v2`) in `PAUSED` status under existing Campaign `120252176243860380`.
+- **Phase 1: Dormant Deployment:**
+  - Deploys replacement ad set in `PAUSED` status with a temporary 24-hour buffer schedule.
+  - Deploys creative and ad object in `PAUSED` status for Meta policy review.
+  - Preserves original ad set `120252176254130380` completely intact.
+  - Records an immutable `RESOURCE_SUPERSEDED` audit event linking old and new ad sets.
+  - Experiment remains in `APPROVED` status (`actual_start = None`).
+- **Phase 2: Readiness-Gated Activation:**
+  - Verifies ad review approval (`effective_status != 'DISAPPROVED'`).
+  - Verifies explicit human operator activation authorization.
+  - Verifies SAFE_MODE is explicitly un-gated for this single execution.
+  - Verifies actual spend on financial ledger is strictly `₹0.00`.
+  - Locks flight window to an exact 48.0-hour future duration.
+  - Unpauses replacement ad set, then unpauses ad object, then verifies delivery on Meta before transitioning experiment to `RUNNING`.
+
+---
+
+## Step 90.12.1 — Audit and Correct Ad-Level Activation
+
+### 1. Findings & Defect Addressed
+- **Defect Identified:** Phase 2 previously unpaused only the replacement ad set while leaving the individual ad object in `PAUSED` status, preventing delivery.
+- **Correction Applied:** Decoupled ad set and ad unpausing in `activate_recovery_flight()`. Explicitly activates replacement ad set, verifies readback, activates ad object, and verifies readback.
+
+---
+
+## Step 90.12.2 — Emergency Stop and Resource-Target Audit
+
+### 1. Scope & Objective
+- Conducted a read-only audit tracing `emergency_pause_adset()` across all four resource tiers: Campaign, Ad, Replacement Ad Set, and Original Ad Set.
+- Analyzed failure propagation, readback verification, and edge-case behavior if original ad set `120252176254130380` is unexpectedly found `ACTIVE`.
+
+---
+
+## Step 90.12.3 — Emergency Stop Safety Correction
+
+### 1. Hardening Applied
+- **Anomaly Detection:** In `activate_recovery_flight()`, the original ad set is inspected via remote readback. If found `ACTIVE`, activation immediately aborts (`ORIGINAL_ADSET_UNEXPECTEDLY_ACTIVE`), emergency pause is triggered on that original ad set, and execution is never marked `ACTIVATED`.
+- **Failure Transparency:** Multi-tier emergency stop records all pause outcomes in domain objects (`EmergencyStopResult`) and surfaces unpaused resources in `unresolved_scopes`.
+
+---
+
+## Step 90.12.4 — Campaign Ownership Verification Audit
+
+### 1. Scope & Findings
+- Evaluated campaign pausing safety: Verified that campaign pausing is permitted only when exact campaign ID matches the execution record for the target experiment, Meta ad account ID matches, and no conflicting ownership exists.
+
+---
+
+## Step 90.12.5 — Multi-Factor Campaign Ownership Verification
+
+### 1. Implementations
+- **Repository Exclusivity:** Added `ExternalExecutionRepository.get_by_campaign_id(campaign_id)` performing exact equality queries. Requires exactly one matching execution record.
+- **Historical Lineage Audit:** Added `get_events_by_resource_id()` to inspect historical audit events and reject campaign pause if historical records indicate conflicting ownership or superseding.
+
+---
+
+## Step 90.12.6 — Final Independent Safety Review
+
+### 1. Findings
+- Verified campaign-tier filtering, single-execution ownership, exact account normalization, and readback verification across all tiers. Tested malformed account ID edge cases (empty strings, non-string types, repeated `act_` prefixes).
+
+---
+
+## Step 90.12.7 — Final Validation Gap Closure
+
+### 1. Findings
+- Identified need for strict account ID format normalization (ASCII digits only, optional single `act_` prefix) and proactive token preflight checks before dormant deployment and activation.
+
+---
+
+## Step 90.12.8 — Strict Ownership Validation & Token Preflight Hardening
+
+### 1. Implementations
+- **Strict Account Normalization:** Added `validate_meta_account_id()` enforcing string-only, ASCII-digit-only normalization with optional single `act_` prefix.
+- **Token Preflight:** Added `inspect_token()` verifying 72-hour validity window ($48\text{h flight} + 24\text{h buffer}$) before dormant deployment and activation.
+- **Emergency Stop Routing:** Routed Option B recovery executions to four-tier `emergency_pause_adset()` and blocked legacy campaign-only emergency stop.
+
+---
+
+## Step 90.12.9 — Token Inspector Authentication & Recovery Authorization Audit
+
+### 1. Implementations & Findings
+- **Inspector Authentication:** Hardened `/debug_token` inspection to require an App Access Token (`META_APP_ACCESS_TOKEN`). Fails closed with `UNVERIFIED_INSPECTOR_AUTHENTICATION` if inspector credential is not configured.
+- **Metadata Validation:** Validates `is_valid == True`, `app_id == "1063651013045060"`, `type in {"SYSTEM_USER", "SYSTEM", "USER"}`, required scopes (`ads_management`, `ads_read`), granular account coverage, `data_access_expires_at` ($\ge 72\text{h}$), and `expires_at`.
+- **Durable Authorization Events:** Replaced in-memory specification flags with `record_recovery_version_authorization()` creating durable `RECOVERY_VERSION_AUTHORIZED` audit events.
+- **Lineage Classification:** Added `classify_execution_lineage()` categorizing executions into `STANDARD`, `OPTION_B`, and `AMBIGUOUS_RECOVERY`. Ambiguous recovery fails closed with zero external mutations.
+
+---
+
+## Step 90.12.10 — Recovery Authorization Trust Boundary & Final Safety Audit
+
+### 1. Security Audit Findings & Hardening
+- **Trust Boundary Gap Identified:** VentureBot currently lacks a trusted operator authentication/RBAC subsystem. In `record_recovery_version_authorization()`, `operator_id` is an unauthenticated caller-supplied string. An arbitrary caller could supply any operator identity.
+- **Rule A.7 & A.8 Enforcement:** Rather than inventing a fragile string whitelist, `deploy_recovery_dormant()` strictly **fails closed** on any recovery version above 2 (`UNTRUSTED_OPERATOR_AUTHENTICATION`). Recovery versions above 2 remain permanently blocked pending integration of cryptographic or session-bound operator authentication.
+- **Audit Event Immutability Classification:** Formally classified as **application-level append-only**, not database-engine or cryptographically immutable.
+- **Anti-Replay & Anti-Duplicate Guards:** Rejects duplicate authorization events for the same version and execution. Rejects conflicting versions. Rejects deployment if replacement resources for that version were already created.
+- **Test Integrity:** 107 tests in Option B recovery test suite; 618 tests passing in full repository suite. Zero live Meta API mutations.
+
+---
+
+## Step 90.12.11 — Security Freeze & Canonical Project-State Reconciliation
+
+### 1. Final Security Boundaries & Locked Operational Invariants
+1. **Permitted Recovery Version:** Recovery version 2 (`ADSET-v2`) is the **ONLY** permitted recovery version. All recovery versions above 2 remain permanently blocked pending trusted operator authentication/RBAC implementation.
+2. **Untrusted Caller Identity:** Caller-supplied `operator_id` strings are not authenticated identities and cannot cross the security trust boundary.
+3. **Inspector Preflight Fail-Closed:** Meta Graph API `/debug_token` inspection strictly requires an App Access Token (`META_APP_ACCESS_TOKEN`) or verified developer credential. System user self-inspection is unverified and disabled by default; missing inspector credentials block deployment and activation.
+4. **Comprehensive Token Metadata Check:** Deployment and activation require valid token preflight confirming App ID `1063651013045060`, compatible type (`SYSTEM_USER`, `USER`), required scopes (`ads_management`, `ads_read`), granular account coverage, and $\ge 72\text{h}$ remaining validity on both `data_access_expires_at` and `expires_at` (or permanent System User token `0`).
+5. **Emergency Stop Lineage Isolation:** Incomplete, corrupted, or ambiguous recovery lineage classifies as `AMBIGUOUS_RECOVERY` and fails closed immediately without external mutation, never falling through to legacy campaign-only shutdown.
+6. **Audit Event Guarantees:** Audit events in `external_execution_events` are application-level append-only via `ExternalExecutionRepository`, not cryptographically sealed or database-engine immutable.
+7. **Spend Threshold Safeguards:** ₹180 and ₹190 spend thresholds are best-effort monitoring circuit breakers, not guaranteed hard Meta billing caps.
+8. **Telemetry Contract:** `GUIDE_ACCESS` represents a server-observed beacon request, not a verified human visitor, reading, conversion, or revenue.
+
+---
+
+### 2. Operational State & Remote Meta Resources (Verified Read-Only)
+- **SAFE_MODE:** `True` (all live mutation pathways unconditionally gated).
+- **Remote Meta Campaign:** ID **`120252176243860380`** (`VB-EXP-49fde874-9387-5056-934c-51a9cfca164f`), status **`PAUSED`**.
+- **Remote Meta Original Ad Set:** ID **`120252176254130380`** (`VB-EXP-49fde874-9387-5056-934c-51a9cfca164f-ADSET`), status **`PAUSED`**, schedule expired.
+- **Remote Meta Ad Creative:** `None` (0 created).
+- **Remote Meta Ad:** `None` (0 created).
+- **Ad Image Asset:** Hash **`d921604e0240ee8329b3b7fe5235abd4`** intact on Meta.
+- **ExternalExecution Record:** ID `c543f895-96da-4e44-a2c8-bea0311ad9d4`, status `failed`.
+- **Financial Ledger Actual Spend:** **`₹0.00`**.
+- **Committed Budget Allocation:** **`₹200.00`** (Pilot `49fde874-9387-5056-934c-51a9cfca164f`).
+- **Liquid Capital Balance:** **`₹1,000.00`**.
+- **Available Unallocated Capital:** **`₹800.00`**.
+- **Remote Meta Prepaid Wallet Balance:** **`₹200.00 INR`** intact.
+
+---
+
+### 3. Exact Conditions Required Before Any Live Deployment
+1. **Meta Developer App Live Mode:** Operator must transition Meta App `1063651013045060` from Development Mode to Live Mode in the Meta for Developers portal (`developers.facebook.com/apps/1063651013045060`).
+2. **App Access Token Configuration:** `META_APP_ACCESS_TOKEN` must be configured in environment to allow `/debug_token` inspection.
+3. **Explicit Operator Authorization:** Operator must explicitly supply authorized dispatch confirmation (`"AUTHORIZE LIVE LAUNCH"`).
+4. **Targeted SAFE_MODE Ungating:** SAFE_MODE must be un-gated strictly for that single authorized execution.
+5. **Token Inspection Success:** System user token must pass all preflight checks with $\ge 72\text{h}$ validity window.
+6. **Future 48.0h Schedule Lock:** Schedule lock must succeed with a future start time and exact 48.0h duration.
+7. **Original Ad Set PAUSED:** Readback verification must confirm original ad set `120252176254130380` remains `PAUSED`.
+8. **Meta Policy Approval:** Ad object review must be approved by Meta prior to Phase 2 activation.
+
+---
+
+### 4. Current Unresolved Blockers
+1. **Meta Developer App Mode:** App `1063651013045060` remains in Development Mode (requires human operator action in Meta Developer Portal).
+2. **Token Inspector Credential:** `META_APP_ACCESS_TOKEN` is not yet configured in local environment (fails `/debug_token` preflight).
+3. **Trusted Operator Authentication / RBAC:** VentureBot lacks a cryptographic or session-bound operator identity provider (blocks all recovery versions above 2).
+
+---
+
+### Final Classification
+**STEP 90.12.11 COMPLETE — RECOVERY ARCHITECTURE FROZEN & RECONCILED**
 
 
