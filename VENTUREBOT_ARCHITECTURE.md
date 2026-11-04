@@ -632,5 +632,39 @@ To guarantee measurement accuracy, preserve complete audit provenance, and handl
 - **Zero Autonomous Decisions:** Neither raw telemetry nor restatements can trigger automated lifecycle decisions (`SCALE`, `ITERATE`, `KILL`, `HOLD`, `APPROVE`). All decisions remain explicitly human-authorized via `ExperimentDecisionService`.
 
 ---
+
+## 25. Recovery Architecture (Option B) & Emergency-Stop Security Boundaries (Step 90.12 Consolidation)
+
+To ensure auditable recovery from interrupted external deployments without mutating expired resources, VentureBot defines the following canonical recovery architecture:
+
+### 1. Two-Phase Readiness-Gated Recovery (Option B)
+- **Phase 1: Dormant Deployment:** Deploys a deterministic versioned replacement ad set (`-ADSET-v2`) in `PAUSED` status with a 24-hour buffer schedule under the existing campaign. Deploys creative and ad in `PAUSED` status for policy review. Original expired ad sets are preserved completely intact and never modified, deleted, or unpaused. An immutable `RESOURCE_SUPERSEDED` audit event is recorded.
+- **Phase 2: Readiness-Gated Activation:** Activation strictly requires Meta ad review approval, explicit human authorization, SAFE_MODE un-gated strictly for that single action, verified `₹0.00` actual ledger spend, and a schedule locked to an exact 48.0-hour duration in the future.
+
+### 2. Multi-Tier Emergency Stop & Exclusive Campaign Ownership
+- Emergency stopping coordinates pause across all four tiers: Campaign, Ad, Replacement Ad Set, and Original Ad Set.
+- Campaign pausing strictly requires exclusive ownership verification: exact campaign ID matching the target experiment, verified ad account ID matching, single execution record in `ExternalExecutionRepository.get_by_campaign_id()`, and zero conflicting historical audit events.
+
+### 3. Lineage Classification & Legacy Fallthrough Prohibition
+- Every emergency stop evaluates `classify_execution_lineage()`:
+  - `STANDARD`: Standard execution without recovery markers $\rightarrow$ legacy campaign-only shutdown.
+  - `OPTION_B`: Valid recovery execution with verified lineage $\rightarrow$ 4-tier emergency stop.
+  - `AMBIGUOUS_RECOVERY`: Incomplete, malformed, circular, or conflicting lineage $\rightarrow$ **fails closed immediately with zero external mutations**. An ambiguous recovery execution must NEVER fall through to legacy campaign-only shutdown.
+
+### 4. Token Inspector Preflight & Redaction
+- `/debug_token` inspection requires an authorized App Access Token (`META_APP_ACCESS_TOKEN`) or developer credential. System user self-inspection is unverified and disabled by default.
+- Preflight verifies App ID (`1063651013045060`), compatible type (`SYSTEM_USER`/`USER`), required scopes (`ads_management`, `ads_read`), granular account coverage, and $\ge 72\text{h}$ validity on both `data_access_expires_at` and `expires_at`.
+- All credentials in error messages and URLs are sanitized and redacted.
+
+### 5. Recovery Version Trust Boundary
+- Recovery version 2 is the ONLY currently permitted recovery version.
+- Recovery versions above 2 remain permanently blocked pending the implementation of a trusted operator authentication/RBAC subsystem. Caller-supplied operator IDs are unauthenticated strings and cannot cross the security trust boundary.
+
+### 6. Operational & Financial Safeguards
+- Audit events in `external_execution_events` provide an **application-level append-only** guarantee, not engine-level immutability.
+- ₹180 and ₹190 spend thresholds are best-effort monitoring circuit breakers, not guaranteed hard Meta billing caps.
+- `GUIDE_ACCESS` telemetry records server-observed edge beacon requests, not verified human visitors, reading, conversions, or revenue.
+
+---
 *END OF VENTUREBOT ARCHITECTURE DOCUMENT*
 
