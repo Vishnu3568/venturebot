@@ -75,6 +75,12 @@ SAMPLE_TOKEN = "EAABwzL12345fakeToken"
 SAMPLE_PAGE_ID = "10987654321"
 
 
+@pytest.fixture(autouse=True)
+def _enable_reconciliation_mock_testing(monkeypatch: pytest.MonkeyPatch):
+    """Explicitly configure safe mode disabled for mocked reconciliation tests."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
+
+
 @pytest.fixture
 def session() -> Session:
     """Provide isolated in-memory SQLite database session with starting capital initialized."""

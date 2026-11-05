@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -23,11 +25,15 @@ from venturebot.execution.meta import (
     MetaExecutionSpecification,
     MetaMarketingApiAdapter,
     ReconciliationStatus,
+    TokenInspectionResult,
+    TokenStatus,
     deterministic_ad_name,
     deterministic_adset_name,
     deterministic_campaign_name,
     deterministic_creative_name,
     inr_to_paise,
+    sanitize_error,
+    validate_meta_account_id,
 )
 from venturebot.execution.service import ExperimentExecutionService
 from venturebot.models.experiment import Experiment, ExperimentStatus
@@ -105,6 +111,147 @@ class _GatewayInvocationContext:
         self.proposed_budget = proposed_budget
         self.channel = channel
         self.created_at = datetime.now(timezone.utc)
+
+
+def is_safe_mode_enforced(caller_safe_mode: bool | None = None) -> bool:
+    """Evaluate non-bypassable SAFE_MODE enforcement across mutation pathways.
+
+    Invariants:
+    1. If caller_safe_mode is True, safe mode is unconditionally enforced
+       (defense-in-depth restriction).
+    2. In production, if environment SAFE_MODE is active (is_safe_mode() is True),
+       safe mode CANNOT be overridden by caller_safe_mode=False.
+    3. Fails closed (returns True) on any configuration or evaluation error.
+    """
+    try:
+        if caller_safe_mode is True:
+            return True
+
+        return is_safe_mode()
+    except Exception:
+        return True  # Fail closed on any exception
+
+
+def validate_meta_account_id(val: Any) -> str | None:
+    """Strictly validate and normalize a Meta ad account ID.
+
+    Requirements:
+    - Accept strings only. Reject integers, floats, booleans, lists, dictionaries, and None.
+    - Trim surrounding whitespace.
+    - Accept either a plain numeric account ID or exactly one optional 'act_' prefix.
+    - After removing one optional prefix, require non-empty ASCII digits only (.isascii() and .isdigit()).
+    - Reject letters, punctuation, Unicode numerals, embedded whitespace, and repeated prefixes.
+    - Return the normalized numeric account ID string (without 'act_' prefix) or None if invalid.
+    """
+    if not isinstance(val, str) or isinstance(val, bool):
+        return None
+    trimmed = val.strip()
+    if not trimmed:
+        return None
+
+    if trimmed.startswith("act_"):
+        trimmed = trimmed[4:]
+        if trimmed.startswith("act_"):
+            return None
+
+    if not trimmed:
+        return None
+
+    if not (trimmed.isascii() and trimmed.isdigit()):
+        return None
+
+    return trimmed
+
+
+class RecoveryLineageClassification(str, Enum):
+    """Classification of execution state and resource lineage for emergency-stop routing."""
+
+    STANDARD = "STANDARD"
+    OPTION_B = "OPTION_B"
+    AMBIGUOUS_RECOVERY = "AMBIGUOUS_RECOVERY"
+
+
+def classify_execution_lineage(
+    execution: ExternalExecution | None,
+    events: list[ExternalExecutionEvent],
+) -> tuple[RecoveryLineageClassification, str | None, str | None]:
+    """Classify execution lineage into STANDARD, OPTION_B, or AMBIGUOUS_RECOVERY.
+
+    Invariants:
+    1. Returns (classification, original_adset_id, anomaly_reason).
+    2. Missing or empty execution is classified as STANDARD (clean internal termination).
+    3. Any recovery indicators (status=DORMANT_RECOVERY, -ADSET-v in name, superseded events,
+       recovery authorization events) identify a recovery execution.
+    4. If recovery is indicated but lineage is missing, malformed, or inconsistent:
+       fails closed with AMBIGUOUS_RECOVERY.
+    5. An ambiguous recovery execution must NEVER fall through to legacy campaign-only shutdown.
+    """
+    if execution is None:
+        return (RecoveryLineageClassification.STANDARD, None, None)
+
+    superseded_events = [
+        e for e in events
+        if e.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value and e.tier == "adset"
+    ]
+    recovery_auth_events = [
+        e for e in events
+        if e.event_type == ExternalExecutionEventType.RECOVERY_VERSION_AUTHORIZED.value
+    ]
+
+    has_recovery_status = execution.status in (
+        ExternalExecutionStatus.DORMANT_RECOVERY,
+        ExternalExecutionStatus.DEPLOYED_DORMANT,
+    )
+    has_versioned_name = bool(execution.adset_id and "-ADSET-v" in str(execution.adset_id)) or any(
+        "-ADSET-v" in str(e.reason or "") or "-ADSET-v" in str(e.api_request_summary or "")
+        for e in events
+    )
+    has_superseded_events = len(superseded_events) > 0
+    has_auth_events = len(recovery_auth_events) > 0
+
+    is_recovery_execution = (
+        has_recovery_status
+        or has_versioned_name
+        or has_superseded_events
+        or has_auth_events
+    )
+
+    if not is_recovery_execution:
+        return (RecoveryLineageClassification.STANDARD, None, None)
+
+    # Recovery execution detected: validate lineage consistency
+    if not has_superseded_events:
+        return (
+            RecoveryLineageClassification.AMBIGUOUS_RECOVERY,
+            None,
+            "Recovery execution markers detected but RESOURCE_SUPERSEDED lineage event is missing.",
+        )
+
+    old_ids = [e.old_resource_id for e in superseded_events]
+    if any(not oid or not str(oid).strip() for oid in old_ids):
+        return (
+            RecoveryLineageClassification.AMBIGUOUS_RECOVERY,
+            None,
+            "RESOURCE_SUPERSEDED event exists but old_resource_id is missing or empty.",
+        )
+
+    distinct_old_ids = set(str(oid).strip() for oid in old_ids if oid)
+    if len(distinct_old_ids) > 1 or len(superseded_events) > 1:
+        return (
+            RecoveryLineageClassification.AMBIGUOUS_RECOVERY,
+            None,
+            f"Duplicate or conflicting superseded events detected ({len(superseded_events)} events, {len(distinct_old_ids)} distinct old_resource_ids: {sorted(distinct_old_ids)}).",
+        )
+
+    orig_id = list(distinct_old_ids)[0]
+    if execution.adset_id and str(execution.adset_id).strip() == orig_id:
+        return (
+            RecoveryLineageClassification.AMBIGUOUS_RECOVERY,
+            orig_id,
+            f"Execution adset_id '{execution.adset_id}' matches superseded original adset_id (lineage/state mismatch).",
+        )
+
+    return (RecoveryLineageClassification.OPTION_B, orig_id, None)
 
 
 class ExecutionDispatchService:
@@ -229,9 +376,8 @@ class ExecutionDispatchService:
                     experiment_id=request.experiment_id,
                 )
 
-        # 7. Global SAFE_MODE check (default True)
-        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
-        if effective_safe_mode:
+        # 7. Global SAFE_MODE check (non-bypassable)
+        if is_safe_mode_enforced(safe_mode):
             return ExecutionDispatchResult(
                 success=False,
                 blocked=True,
@@ -321,15 +467,166 @@ class ExecutionDispatchService:
         reason: str,
         adapter: MetaMarketingApiAdapter | None = None,
         auto_commit: bool = True,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = True,
     ) -> EmergencyStopResult:
-        """Public emergency-stop gateway coordinating pause on external channel then internal kill."""
+        """Public emergency-stop gateway coordinating pause on external channel then internal kill.
+
+        If the experiment execution has superseded ad set lineage (Option B recovery),
+        it routes through the complete four-tier emergency_pause_adset (Campaign, Ad,
+        Replacement Ad Set, Original Ad Set) with multi-factor ownership verification.
+        Only if external pause succeeds is the internal experiment killed.
+        """
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        events = exec_repo.get_events(execution.id) if execution is not None else []
+        classification, orig_id, anomaly = classify_execution_lineage(execution, events)
+
+        if classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY:
+            # Ambiguous recovery lineage must fail closed!
+            # Must NEVER fall through to legacy campaign-only shutdown and must NOT mutate resources without clear lineage!
+            return EmergencyStopResult(
+                is_successful=False,
+                experiment_id=experiment_id,
+                execution=execution,
+                unresolved_scopes=[f"AMBIGUOUS_RECOVERY_LINEAGE: {anomaly}"],
+                rejection_reason=f"AMBIGUOUS_RECOVERY_LINEAGE: {anomaly}. Legacy campaign-only stop prohibited.",
+            )
+
+        if classification == RecoveryLineageClassification.OPTION_B:
+            pause_res = cls.emergency_pause_adset(
+                session=session,
+                experiment_id=experiment_id,
+                adapter=adapter,
+                safe_mode=safe_mode,
+                explicit_auth=explicit_auth,
+                original_adset_id=orig_id,
+                auto_commit=auto_commit,
+            )
+            if not pause_res.is_successful:
+                return pause_res
+
+            kill_res = ExperimentExecutionService.kill(
+                session,
+                experiment_id,
+                reason=reason,
+                auto_commit=auto_commit,
+            )
+            if not kill_res.is_successful:
+                return EmergencyStopResult(
+                    is_successful=False,
+                    experiment_id=experiment_id,
+                    execution=pause_res.execution,
+                    experiment=kill_res.experiment,
+                    campaign_status=pause_res.campaign_status,
+                    ad_status=pause_res.ad_status,
+                    replacement_adset_status=pause_res.replacement_adset_status,
+                    original_adset_status=pause_res.original_adset_status,
+                    unresolved_scopes=pause_res.unresolved_scopes,
+                    rejection_reason=f"External multi-tier pause succeeded, but internal kill failed: {kill_res.rejection_reason}",
+                )
+
+            return EmergencyStopResult(
+                is_successful=True,
+                experiment_id=experiment_id,
+                execution=pause_res.execution,
+                experiment=kill_res.experiment,
+                campaign_status=pause_res.campaign_status,
+                ad_status=pause_res.ad_status,
+                replacement_adset_status=pause_res.replacement_adset_status,
+                original_adset_status=pause_res.original_adset_status,
+                unresolved_scopes=pause_res.unresolved_scopes,
+            )
+
         return MetaExperimentDispatchService._emergency_stop(
             session=session,
             experiment_id=experiment_id,
             reason=reason,
             adapter=adapter,
             auto_commit=auto_commit,
+            safe_mode=safe_mode,
         )
+
+    @classmethod
+    def record_recovery_version_authorization(
+        cls,
+        session: Session,
+        experiment_id: UUID | None = None,
+        version: int = 3,
+        operator_id: str = "",
+        reason: str = "",
+        execution_id: UUID | None = None,
+        authorized_version: int | None = None,
+        auto_commit: bool = True,
+    ) -> ExternalExecutionEvent:
+        """Durable operator authorization for recovery version > 2.
+
+        Invariants:
+        1. authorized_version / version must be >= 3.
+        2. operator_id must be non-empty string identifying the human operator.
+        3. reason must be non-empty string explaining the authorization.
+        4. execution must exist for experiment_id or execution_id.
+        5. Persists an immutable ExternalExecutionEvent with event_type RECOVERY_VERSION_AUTHORIZED.
+        """
+        target_version = authorized_version if authorized_version is not None else version
+        if target_version < 3:
+            raise ValueError(f"authorized_version must be >= 3, got {target_version}")
+        clean_op = str(operator_id or "").strip()
+        if not clean_op:
+            raise ValueError("operator_id must be a non-empty string identifying the human operator.")
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            raise ValueError("reason must be a non-empty string explaining the authorization.")
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        if execution_id is not None and experiment_id is not None:
+            execution = exec_repo.get(execution_id)
+            if execution is None or execution.experiment_id != experiment_id:
+                raise ValueError(f"Execution '{execution_id}' does not match experiment '{experiment_id}'")
+        elif execution_id is not None:
+            execution = exec_repo.get(execution_id)
+        elif experiment_id is not None:
+            execution = exec_repo.get_by_experiment_id(experiment_id)
+        else:
+            raise ValueError("Either experiment_id or execution_id must be provided.")
+
+        if execution is None:
+            target_ref = str(execution_id or experiment_id)
+            raise ValueError(f"No execution record found for '{target_ref}'")
+
+        # Duplicate and conflicting authorization check
+        existing_auth_events = [
+            e for e in exec_repo.get_events(execution.id)
+            if e.event_type == ExternalExecutionEventType.RECOVERY_VERSION_AUTHORIZED.value
+        ]
+        for existing_ev in existing_auth_events:
+            try:
+                p = json.loads(existing_ev.api_request_summary or "{}")
+                existing_ver = p.get("authorized_version")
+                if existing_ver == target_version:
+                    raise ValueError(f"Duplicate authorization rejected: Recovery version {target_version} is already authorized for execution '{execution.id}'.")
+                elif existing_ver is not None and existing_ver != target_version:
+                    raise ValueError(f"Conflicting authorization rejected: Execution '{execution.id}' already authorized for recovery version {existing_ver}, cannot authorize version {target_version}.")
+            except json.JSONDecodeError:
+                continue
+
+        auth_payload = {
+            "execution_id": str(execution.id),
+            "experiment_id": str(execution.experiment_id),
+            "operator_id": clean_op,
+            "authorized_version": target_version,
+            "authorized_at": datetime.now(timezone.utc).isoformat(),
+            "reason": clean_reason,
+        }
+        event = ExternalExecutionEvent(
+            execution_id=execution.id,
+            event_type=ExternalExecutionEventType.RECOVERY_VERSION_AUTHORIZED.value,
+            tier="adset",
+            new_resource_id=f"ADSET-v{target_version}",
+            reason=f"Operator '{clean_op}' explicitly authorized recovery version {target_version}: {clean_reason}",
+            api_request_summary=json.dumps(auth_payload),
+        )
+        return exec_repo.record_event(event)
 
     @classmethod
     def deploy_recovery_dormant(
@@ -358,8 +655,8 @@ class ExecutionDispatchService:
         10. Creative and Ad are created in PAUSED status.
         11. Experiment status remains APPROVED (actual_start remains None).
         """
-        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
-        if effective_safe_mode:
+        # 1. Non-bypassable SAFE_MODE enforcement
+        if is_safe_mode_enforced(safe_mode):
             return RecoveryDormantResult(
                 success=False,
                 blocked=True,
@@ -372,6 +669,136 @@ class ExecutionDispatchService:
                 success=False,
                 blocked=True,
                 reason="EXPLICIT_AUTHORIZATION_REQUIRED",
+                experiment_id=experiment_id,
+            )
+
+        # Duplicate Recovery Boundary Enforcement:
+        # Recovery versions start at version 2.
+        if version < 2:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"INVALID_RECOVERY_VERSION: Recovery version must be >= 2, got {version}.",
+                experiment_id=experiment_id,
+            )
+
+        # Versions > 2 require durable operator authorization in ExternalExecutionEvent
+        if version > 2:
+            exec_repo_pre = ExternalExecutionRepository(session, auto_commit=False)
+            exec_pre = exec_repo_pre.get_by_experiment_id(experiment_id)
+            if exec_pre is None:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"UNAUTHORIZED_RECOVERY_VERSION: No execution record found for experiment '{experiment_id}'.",
+                    experiment_id=experiment_id,
+                )
+
+            auth_events = [
+                e for e in exec_repo_pre.get_events(exec_pre.id)
+                if e.event_type == ExternalExecutionEventType.RECOVERY_VERSION_AUTHORIZED.value
+            ]
+            if not auth_events:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=(
+                        f"UNAUTHORIZED_RECOVERY_VERSION: Recovery version {version} requires durable operator "
+                        f"authorization persisted via record_recovery_version_authorization(). "
+                        f"Caller-supplied parameter alone is rejected."
+                    ),
+                    experiment_id=experiment_id,
+                )
+
+            # Check for multiple/conflicting authorization events
+            if len(auth_events) > 1:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=(
+                        f"CONFLICTING_RECOVERY_AUTHORIZATION: Multiple recovery authorization records "
+                        f"({len(auth_events)}) exist for execution '{exec_pre.id}'. Must fail closed."
+                    ),
+                    experiment_id=experiment_id,
+                )
+
+            ev = auth_events[0]
+            try:
+                payload = json.loads(ev.api_request_summary or "{}")
+            except Exception:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason="MALFORMED_RECOVERY_AUTHORIZATION: Authorization audit payload is malformed.",
+                    experiment_id=experiment_id,
+                )
+
+            ev_version = payload.get("authorized_version")
+            if ev_version != version:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"UNAUTHORIZED_RECOVERY_VERSION: Approval for version {ev_version} cannot authorize version {version}.",
+                    experiment_id=experiment_id,
+                )
+
+            ev_exp = payload.get("experiment_id")
+            ev_exec = payload.get("execution_id")
+            if ev_exp and ev_exp != str(experiment_id):
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"MISMATCHED_RECOVERY_AUTHORIZATION: Approval for experiment '{ev_exp}' cannot authorize experiment '{experiment_id}'.",
+                    experiment_id=experiment_id,
+                )
+            if ev_exec and ev_exec != str(exec_pre.id):
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"MISMATCHED_RECOVERY_AUTHORIZATION: Approval for execution '{ev_exec}' cannot authorize execution '{exec_pre.id}'.",
+                    experiment_id=experiment_id,
+                )
+
+            # Replay prevention: Check if replacement ad set for this version has already been created/deployed
+            existing_created = [
+                e for e in exec_repo_pre.get_events(exec_pre.id)
+                if e.tier == "adset"
+                and (
+                    f"-ADSET-v{version}" in str(e.new_resource_id or "")
+                    or f"-ADSET-v{version}" in str(e.reason or "")
+                    or f"-ADSET-v{version}" in str(e.api_request_summary or "")
+                    or (
+                        e.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value
+                        and f"ADSET-v{version}" in str(e.reason or "")
+                    )
+                )
+            ]
+            if existing_created:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=(
+                        f"RECOVERY_AUTHORIZATION_REPLAY_REJECTED: Recovery version {version} authorization "
+                        f"has already been consumed by prior deployment ({existing_created[0].new_resource_id}). "
+                        "Repeated resource creation is prohibited."
+                    ),
+                    experiment_id=experiment_id,
+                )
+
+            # Rule A.7 & A.8: Trusted Operator Authentication Trust Boundary Enforcement
+            # VentureBot lacks a trusted operator authentication/authorization provider (session/crypto/RBAC).
+            # A caller-supplied operator_id string cannot establish an authentic trust boundary.
+            # Recovery versions above 2 remain strictly blocked.
+            operator_id = payload.get("operator_id") or "UNKNOWN"
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=(
+                    f"UNTRUSTED_OPERATOR_AUTHENTICATION: Recovery version {version} is blocked. "
+                    f"Operator identity '{operator_id}' is caller-supplied and cannot be verified "
+                    "because VentureBot does not possess a trusted operator authentication/RBAC provider. "
+                    "All recovery versions above 2 remain strictly blocked pending trusted authentication (Rules A.7/A.8)."
+                ),
                 experiment_id=experiment_id,
             )
 
@@ -431,6 +858,16 @@ class ExecutionDispatchService:
         if adapter is None:
             adapter = MetaMarketingApiAdapter(ad_account_id=spec.ad_account_id)
 
+        # Proactive Meta Access Token Expiry Validation (covers 48h flight + 24h buffer = 72h)
+        token_insp = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+        if token_insp.status != TokenStatus.VALID:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"TOKEN_PREFLIGHT_FAILED: {token_insp.status.value} - {_sanitize_error(token_insp.rejection_reason or '')}",
+                experiment_id=experiment_id,
+            )
+
         try:
             if adapter.get_campaign_budget_sharing(execution.campaign_id):
                 return RecoveryDormantResult(
@@ -448,16 +885,19 @@ class ExecutionDispatchService:
             )
 
         # Record superseding of the original ad set if present (do not archive or delete remote object)
-        old_adset_id = execution.adset_id
-        if old_adset_id:
+        existing_superseded = [
+            e for e in exec_repo.get_events(execution.id)
+            if e.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value and e.tier == "adset"
+        ]
+        if not existing_superseded and execution.adset_id:
             exec_repo.record_event(
                 ExternalExecutionEvent(
                     execution_id=execution.id,
                     event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
                     tier="adset",
-                    old_resource_id=old_adset_id,
+                    old_resource_id=execution.adset_id,
                     new_resource_id=None,
-                    reason=f"Original ad set {old_adset_id} superseded by versioned ADSET-v{version} for fresh 48h flight",
+                    reason=f"Original ad set {execution.adset_id} superseded by versioned ADSET-v{version} for fresh 48h flight",
                 )
             )
 
@@ -479,7 +919,8 @@ class ExecutionDispatchService:
                     tier="adset",
                     old_resource_id=None,
                     new_resource_id=new_adset_id,
-                    reason="Adopted existing replacement ad set",
+                    reason=f"Adopted existing replacement ad set ({replacement_name})",
+                    api_request_summary=json.dumps({"name": replacement_name, "version": version}),
                 )
             )
         elif adset_lookup.status == ReconciliationStatus.NOT_FOUND:
@@ -506,7 +947,8 @@ class ExecutionDispatchService:
                         tier="adset",
                         old_resource_id=None,
                         new_resource_id=new_adset_id,
-                        reason="Created dormant replacement ad set with 24h buffer schedule",
+                        reason=f"Created dormant replacement ad set ({replacement_name}) with 24h buffer schedule",
+                        api_request_summary=json.dumps({"name": replacement_name, "version": version}),
                     )
                 )
             except Exception as e:
@@ -785,8 +1227,7 @@ class ExecutionDispatchService:
         explicit_auth: bool = False,
     ) -> ScheduleLockResult:
         """Phase 2b: Lock an exact 48.0-hour schedule prior to live activation."""
-        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
-        if effective_safe_mode:
+        if is_safe_mode_enforced(safe_mode):
             return ScheduleLockResult(success=False, blocked=True, reason="SAFE_MODE_ENABLED")
 
         if not explicit_auth:
@@ -871,8 +1312,7 @@ class ExecutionDispatchService:
         12. Retries are idempotent. Partial activation returns is_partially_activated=True.
         13. Does NOT mark experiment RUNNING (remains APPROVED until impressions/spend verified).
         """
-        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
-        if effective_safe_mode:
+        if is_safe_mode_enforced(safe_mode):
             return ActivationResult(success=False, blocked=True, reason="SAFE_MODE_ENABLED")
 
         if not explicit_auth:
@@ -942,6 +1382,18 @@ class ExecutionDispatchService:
 
         if adapter is None:
             adapter = MetaMarketingApiAdapter(ad_account_id=execution.external_account_id)
+
+        # Pre-activation check 0: Proactive Meta Access Token Expiry Validation (covers 48h flight + 24h buffer = 72h)
+        token_insp = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+        if token_insp.status != TokenStatus.VALID:
+            return ActivationResult(
+                success=False,
+                blocked=True,
+                reason=f"TOKEN_PREFLIGHT_FAILED: {token_insp.status.value} - {_sanitize_error(token_insp.rejection_reason or '')}",
+                campaign_id=execution.campaign_id,
+                adset_id=execution.adset_id,
+                ad_id=execution.ad_id,
+            )
 
         # Pre-activation check 1: Meta ad review approval
         try:
@@ -1329,19 +1781,25 @@ class ExecutionDispatchService:
 
         Performs read-back verification on all targets. Never silently swallows exceptions.
         """
-        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
-        if effective_safe_mode:
-            return EmergencyStopResult(
-                is_successful=False,
-                experiment_id=experiment_id,
-                rejection_reason="SAFE_MODE_ENABLED",
-            )
-
+        # Emergency stop authorization boundary:
+        # Requires explicit emergency stop authorization.
         if not explicit_auth:
             return EmergencyStopResult(
                 is_successful=False,
                 experiment_id=experiment_id,
                 rejection_reason="EXPLICIT_AUTHORIZATION_REQUIRED",
+            )
+
+        # In safe mode, all mutations (including emergency pause) are strictly blocked
+        # until a trustworthy operator identity / authentication boundary exists (Task E).
+        if is_safe_mode_enforced(safe_mode):
+            return EmergencyStopResult(
+                is_successful=False,
+                experiment_id=experiment_id,
+                rejection_reason=(
+                    "SAFE_MODE_ENABLED: Live Meta emergency pause is disabled in safe mode. "
+                    "Emergency pause is unavailable until a trustworthy authorization boundary exists."
+                ),
             )
 
         exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
@@ -1368,30 +1826,103 @@ class ExecutionDispatchService:
         adset_status: ResourcePauseStatus | None = None
         orig_status: ResourcePauseStatus | None = None
 
-        # Tier 1: Parent Campaign (verify exclusive ownership before pausing)
+        # Tier 1: Parent Campaign (verify exclusive multi-factor ownership before pausing)
         if execution.campaign_id:
             camp_status = ResourcePauseStatus(
                 resource_type="campaign",
                 resource_id=execution.campaign_id,
             )
             camp_ownership_verified = False
-            try:
-                camp_meta = adapter.get_campaign(execution.campaign_id)
-                camp_name = str(camp_meta.get("name", ""))
-                expected_prefix = f"VB-EXP-{experiment_id}"
-                if camp_name.startswith(expected_prefix):
-                    camp_ownership_verified = True
-                else:
-                    unresolved_scopes.append(
-                        f"Campaign '{execution.campaign_id}' ownership unverified: name '{camp_name}' does not match expected prefix '{expected_prefix}'"
-                    )
-                    camp_status.error = "Ownership unverified"
-            except Exception as e:
-                safe_err = _sanitize_error(str(e))
-                unresolved_scopes.append(
-                    f"Campaign '{execution.campaign_id}' ownership check failed: {safe_err}"
+            ownership_failures: list[str] = []
+
+            # Factor 1: Repository-Level Current Execution Exclusivity
+            matching_executions = exec_repo.get_by_campaign_id(execution.campaign_id)
+            if len(matching_executions) == 0:
+                ownership_failures.append(
+                    f"No current execution records reference campaign '{execution.campaign_id}'"
                 )
-                camp_status.error = f"Ownership check failed: {safe_err}"
+            elif len(matching_executions) > 1:
+                ownership_failures.append(
+                    f"Campaign '{execution.campaign_id}' is referenced by {len(matching_executions)} distinct current executions"
+                )
+            elif matching_executions[0].id != execution.id or matching_executions[0].experiment_id != experiment_id:
+                ownership_failures.append(
+                    f"Campaign '{execution.campaign_id}' is owned by another experiment '{matching_executions[0].experiment_id}'"
+                )
+
+            # Factor 2: Historical Lineage & Event Audit
+            # Distinguish:
+            # - Current execution events: legitimate historical references of this execution
+            # - Conflicting events: events referencing this campaign from another execution/experiment
+            # - Superseding events: events on this execution indicating campaign itself was superseded
+            campaign_events = exec_repo.get_events_by_resource_id(execution.campaign_id, tier="campaign")
+            for ev in campaign_events:
+                if ev.execution_id != execution.id:
+                    ownership_failures.append(
+                        f"Conflicting historical event '{ev.event_type}' on execution '{ev.execution_id}' references campaign '{execution.campaign_id}'"
+                    )
+                    break
+                if ev.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value and ev.old_resource_id == execution.campaign_id:
+                    ownership_failures.append(
+                        f"Campaign '{execution.campaign_id}' was superseded on execution '{execution.id}'"
+                    )
+                    break
+
+            # Factor 3: Remote Metadata & Ad Account Validation
+            if not ownership_failures:
+                try:
+                    camp_meta = adapter.get_campaign(execution.campaign_id)
+                    raw_remote_id = camp_meta.get("id")
+                    remote_id = raw_remote_id.strip() if isinstance(raw_remote_id, str) else None
+                    raw_remote_account = camp_meta.get("account_id")
+                    raw_local_account = execution.external_account_id
+                    raw_camp_name = camp_meta.get("name")
+                    camp_name = raw_camp_name.strip() if isinstance(raw_camp_name, str) else ""
+                    expected_prefix = f"VB-EXP-{experiment_id}"
+
+                    # 3a. Exact remote ID match
+                    if not remote_id:
+                        ownership_failures.append("Remote campaign ID is missing or empty")
+                    elif remote_id != execution.campaign_id:
+                        ownership_failures.append(
+                            f"Remote campaign ID '{remote_id}' does not match expected '{execution.campaign_id}'"
+                        )
+
+                    # 3b. Remote & Local Account ID normalization and validation
+                    norm_local = validate_meta_account_id(raw_local_account)
+                    norm_remote = validate_meta_account_id(raw_remote_account)
+
+                    if norm_local is None:
+                        ownership_failures.append(
+                            f"Local account ID '{raw_local_account}' is missing or malformed"
+                        )
+                    if norm_remote is None:
+                        ownership_failures.append(
+                            f"Remote account ID '{raw_remote_account}' is missing or malformed"
+                        )
+                    elif norm_local is not None and norm_remote != norm_local:
+                        ownership_failures.append(
+                            f"Remote campaign account '{raw_remote_account}' does not match expected '{raw_local_account}'"
+                        )
+
+                    # 3c. Secondary Name Prefix Check
+                    if not camp_name:
+                        ownership_failures.append("Remote campaign name is missing or empty")
+                    elif not camp_name.startswith(expected_prefix):
+                        ownership_failures.append(
+                            f"Remote campaign name '{camp_name}' does not match expected prefix '{expected_prefix}'"
+                        )
+
+                    if not ownership_failures:
+                        camp_ownership_verified = True
+                except Exception as e:
+                    safe_err = _sanitize_error(str(e))
+                    ownership_failures.append(f"Remote campaign inspection failed: {safe_err}")
+
+            if not camp_ownership_verified:
+                for reason in ownership_failures:
+                    unresolved_scopes.append(f"Campaign '{execution.campaign_id}' ownership unverified: {reason}")
+                camp_status.error = "; ".join(ownership_failures) if ownership_failures else "Ownership unverified"
 
             if camp_ownership_verified:
                 camp_status.attempted = True
@@ -1704,11 +2235,8 @@ class SpendThresholdStatus(BaseModel):
     )
 
 
-def _sanitize_error(error_msg: str) -> str:
-    """Strip access tokens and sensitive credentials from error strings."""
-    cleaned = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer [REDACTED]", str(error_msg))
-    cleaned = re.sub(r"access_token=[^&\s]+", "access_token=[REDACTED]", cleaned)
-    return cleaned
+# Alias centralized sanitizer for backwards compatibility
+_sanitize_error = sanitize_error
 
 
 class MetaExperimentDispatchService:
@@ -1756,9 +2284,8 @@ class MetaExperimentDispatchService:
                 rejection_reason="Gateway invocation context does not match target experiment.",
             )
 
-        # 0b. Defense-in-depth SAFE_MODE check
-        effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode
-        if effective_safe_mode:
+        # 0b. Defense-in-depth SAFE_MODE check (non-bypassable)
+        if is_safe_mode_enforced(safe_mode):
             return DispatchResult(
                 is_successful=False,
                 experiment_id=experiment_id,
@@ -2239,6 +2766,7 @@ class MetaExperimentDispatchService:
         reason: str,
         adapter: MetaMarketingApiAdapter | None = None,
         auto_commit: bool = True,
+        safe_mode: bool | None = None,
     ) -> EmergencyStopResult:
         """Attempt to pause active external Meta campaign before terminating internal experiment.
 
@@ -2251,8 +2779,47 @@ class MetaExperimentDispatchService:
         exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
         execution = exec_repo.get_by_experiment_id(experiment_id)
 
+        # Prohibit legacy campaign-only emergency stop for Option B and ambiguous recovery executions
+        if execution is not None:
+            events = exec_repo.get_events(execution.id)
+            classification, _, anomaly = classify_execution_lineage(execution, events)
+            if classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY:
+                return EmergencyStopResult(
+                    is_successful=False,
+                    experiment_id=experiment_id,
+                    execution=execution,
+                    rejection_reason=(
+                        f"AMBIGUOUS_RECOVERY_LINEAGE_PROHIBITED: "
+                        f"Classification is {classification.value} ({anomaly or 'Ambiguous recovery'}). "
+                        "Cannot safely execute legacy campaign-only emergency stop."
+                    ),
+                )
+            if classification == RecoveryLineageClassification.OPTION_B:
+                return EmergencyStopResult(
+                    is_successful=False,
+                    experiment_id=experiment_id,
+                    execution=execution,
+                    rejection_reason=(
+                        f"LEGACY_EMERGENCY_STOP_PROHIBITED_FOR_OPTION_B: "
+                        f"Classification is {classification.value} ({anomaly or 'Option B recovery'}). "
+                        "Option B and recovery executions must use multi-tier emergency_pause_adset."
+                    ),
+                )
+
         # If external deployment exists and has a campaign_id, attempt to pause it on Meta first
         if execution is not None and execution.campaign_id:
+            # Legacy campaign-only emergency stop lacks multi-factor ownership verification.
+            # In production when SAFE_MODE is active, it must block unverified external mutations.
+            if is_safe_mode_enforced(safe_mode):
+                return EmergencyStopResult(
+                    is_successful=False,
+                    experiment_id=experiment_id,
+                    execution=execution,
+                    rejection_reason=(
+                        "SAFE_MODE_ENABLED: Legacy campaign-only emergency stop cannot perform "
+                        "external mutations while SAFE_MODE is active. Use multi-tier emergency_pause_adset."
+                    ),
+                )
             if adapter is None:
                 adapter = MetaMarketingApiAdapter(ad_account_id=execution.external_account_id)
             try:

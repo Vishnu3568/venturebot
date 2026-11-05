@@ -596,9 +596,10 @@ def test_step41_e_safe_mode_true_blocks_deploy_experiment_before_tier2(
 
 
 def test_step41_f_safe_mode_false_allows_request_to_reach_tier2_using_mock_transport(
-    approved_experiment: ExperimentORM, db_session: Session
+    approved_experiment: ExperimentORM, db_session: Session, monkeypatch: pytest.MonkeyPatch
 ):
     """F. Verify SAFE_MODE=False allows the request to reach Tier 2 using mocked transport."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
     spec = _make_valid_meta_spec(approved_experiment.id)
     adapter = MetaMarketingApiAdapter(
         ad_account_id=spec.ad_account_id,
@@ -723,9 +724,10 @@ def test_step41_i_dispatch_from_gateway_independently_blocks_when_safe_mode_true
 
 
 def test_step41_j_emergency_stop_gateway(
-    approved_experiment: ExperimentORM, db_session: Session
+    approved_experiment: ExperimentORM, db_session: Session, monkeypatch: pytest.MonkeyPatch
 ):
     """J. Verify ExecutionDispatchService.emergency_stop() coordinates external pause then internal kill."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
     spec = _make_valid_meta_spec(approved_experiment.id)
     adapter = MetaMarketingApiAdapter(
         ad_account_id=spec.ad_account_id,

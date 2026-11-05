@@ -538,8 +538,9 @@ def test_live_write_guardrail_strictly_blocks_unmocked_requests():
         adapter.pause_campaign(campaign_id="120205837492810384")
 
 
-def test_full_mocked_creation_and_pause_sequence():
+def test_full_mocked_creation_and_pause_sequence(monkeypatch: pytest.MonkeyPatch):
     """Verify entire sequential creation and emergency pause lifecycle using mock transport."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
     recorded_requests: list[urllib.request.Request] = []
 
     def mock_transport(req: urllib.request.Request, timeout: float) -> bytes:
@@ -613,8 +614,9 @@ def test_full_mocked_creation_and_pause_sequence():
 
 # ── X - Z. Zero Side-Effect Safety Checks ────────────────────────────────────
 
-def test_zero_capital_ledger_experiment_or_decision_mutations():
+def test_zero_capital_ledger_experiment_or_decision_mutations(monkeypatch: pytest.MonkeyPatch):
     """Verify that mocked adapter operations cause zero database mutations."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
     engine = get_engine("sqlite:///:memory:")
     init_db(engine)
     session_factory = get_session_factory(engine)

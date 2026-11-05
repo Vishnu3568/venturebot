@@ -56,22 +56,34 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.60 — Auditable Recovery Architecture & Security Freeze (Step 90.12.11)
+V1.63 — Independent Code Audit & Defect Fixes (Step 90.12.15)
 
 ---
 
 ## Current Status
 
-Step 90.12.11 Complete — Security Freeze & Canonical Project-State Reconciliation (100% Hermetic Test Verification: 618 passing tests)
+Step 90.12.15 Complete — Independent Full Code Audit & Defect Fixes Verified (100% Hermetic Test Verification: 634 passing tests)
 
-- **Step 90.12.1–90.12.11 Recovery & Security Architecture Summary:**
+- **Step 90.12.15 Independent Code Audit & Defect Fixes Summary:**
+  - **Replay Prevention Fix (HIGH):** In Step 90.12.10, replay prevention only matched version substrings inside `new_resource_id`. Because Meta ad set IDs are purely numeric strings (e.g. `120252176299999999`), real deployments would fail to trigger replay protection. Updated `deploy_recovery_dormant` to record `replacement_name` and `version` in `api_request_summary` and event `reason`, and expanded replay check to evaluate `reason` and `api_request_summary`, ensuring versioned authorizations cannot be replayed.
+  - **Token Scope Whitespace & Prefix Normalization Fix (HIGH):** Fixed bug where whitespace-padded account IDs (e.g. `"  act_1985595022114520  "`) failed to match granular scopes because `.removeprefix("act_")` failed on leading whitespace, creating invalid targets like `"act_act_1985595022114520"`. `inspect_token` now strips whitespace and validates account IDs via `validate_meta_account_id()`, failing closed on malformed IDs.
+  - **Strict Account ID Validation Enforcement (MEDIUM):** Wired centralized `validate_meta_account_id` into `MetaMarketingApiAdapter.normalize_ad_account_id` and `MetaExecutionSpecification.validate_ad_account_id`, strictly enforcing ASCII digits, rejecting repeated `act_` prefixes, punctuation, and Unicode digits, while preserving standard empty/whitespace check backward compatibility.
+  - **Legacy Emergency-Stop SAFE_MODE Check Fix (MEDIUM):** Replaced raw `is_safe_mode()` in `MetaExperimentDispatchService._emergency_stop` with `is_safe_mode_enforced(safe_mode)`, ensuring caller-supplied `safe_mode=True` blocks external mutations even when `VENTUREBOT_SAFE_MODE=false`.
+  - **Credential Sanitizer Redaction Hardening (LOW):** Replaced partial regex sanitizer with centralized `sanitize_error` in `meta.py` (re-exported in `dispatch.py`), stripping secrets from URL query parameters (`input_token`, `access_token`), Bearer auth headers, `appsecret_proof`, and JSON keys (`"access_token"`, `"input_token"`).
+  - **Recovery Lineage Classification Event Inspection (LOW):** Expanded `classify_execution_lineage` to inspect both `execution.adset_id` and historical execution events (`reason` and `api_request_summary`), ensuring versioned replacement ad sets are correctly recognized as Option B recovery even when `adset_id` is a purely numeric Meta ID.
+  - **Test Suite Expansion:** Added `tests/test_audit_defect_fixes.py` with 7 dedicated regression tests. Total repository test count increased to 634 passing tests.
+  - **Safety Preserved:** Zero live Meta API mutations made, ₹0.00 spent, SAFE_MODE=True preserved.
+
+- **Step 90.12.1–90.12.14 Recovery, Security & Boundary Hardening Summary:**
   - **Option B Architecture:** 2-phase recovery architecture implemented and hardened. Phase 1 deploys replacement resources in `PAUSED` status with a 24-hour buffer schedule under existing campaign `120252176243860380` without touching expired ad set `120252176254130380`. Phase 2 requires Meta ad review approval, explicit human authorization, and locks schedule to exact 48.0h in the future.
   - **Activation Hardening:** Explicitly activates both replacement ad set and individual ad object in sequence, aborting immediately if the original ad set `120252176254130380` is found `ACTIVE`.
   - **Multi-Tier Emergency Stop:** Verifies exclusive campaign ownership (`ExternalExecutionRepository.get_by_campaign_id`, exact account ID matching, historical event audit) and pauses all four tiers (Campaign, Ad, Replacement Ad Set, Original Ad Set).
   - **Lineage Classification:** `classify_execution_lineage` isolates `STANDARD`, `OPTION_B`, and `AMBIGUOUS_RECOVERY`. Incomplete or ambiguous recovery lineage fails closed with zero external mutations, never falling through to legacy campaign-only shutdown.
   - **Token Preflight Hardening:** `/debug_token` inspection enforces App Access Token credentials, validating App ID `1063651013045060`, compatible type (`SYSTEM_USER`, `USER`), required scopes (`ads_management`, `ads_read`), granular account coverage, data access expiry ($\ge 72\text{h}$), and token expiry. Fails closed without silent self-inspection fallback.
   - **Trust Boundary Enforcement (Step 90.12.10):** Acknowledged that VentureBot currently lacks a trusted operator authentication/RBAC subsystem. In accordance with Rules A.7 and A.8, caller-supplied operator IDs are treated as unverified, and all recovery versions above 2 remain permanently blocked.
-  - **Test Verification:** 618 tests passing across the repository (107 tests in Option B recovery test suite). Zero live Meta API mutations made. SAFE_MODE=True preserved.
+  - **Non-Bypassable SAFE_MODE Guard (Step 90.12.13):** Eliminates `safe_mode=False` overrides against `VENTUREBOT_SAFE_MODE=true` via `is_safe_mode_enforced()`. Legacy emergency stop fails closed in safe mode.
+  - **Adapter-Level SAFE_MODE Enforcement & Test Isolation (Step 90.12.14):** Fixed adapter boundary vulnerability where configured HTTP transports bypassed SAFE_MODE. `MetaMarketingApiAdapter._execute_request()` now enforces fail-closed `is_safe_mode()` check before any transport execution across all HTTP write methods (POST, PUT, DELETE, PATCH, or `is_write=True`). Purged `_TestHarnessContext` backdoor from production code and removed `tests/conftest.py`. Adopted conservative emergency-stop policy: emergency pause fails closed under SAFE_MODE (`SAFE_MODE_ENABLED`) until a trustworthy operator identity boundary is implemented.
+  - **Test Verification:** 627 tests passing across the repository (9 dedicated tests in `test_safe_mode_boundary.py`, 107 tests in Option B recovery test suite). Zero live Meta API mutations made. SAFE_MODE=True preserved.
 
 - **Step 90.2 Privacy Policy Implementation Summary (Historical):**
   - **Prerequisite Addressed:** Meta Developer App Production Readiness blocker (Step 90.1) requiring a public Privacy Policy URL for App `1063651013045060`.
@@ -4791,7 +4803,13 @@ Live execution requires an explicit, separate human launch authorization.
 4. **Comprehensive Token Metadata Check:** Deployment and activation require valid token preflight confirming App ID `1063651013045060`, compatible type (`SYSTEM_USER`, `USER`), required scopes (`ads_management`, `ads_read`), granular account coverage, and $\ge 72\text{h}$ remaining validity on both `data_access_expires_at` and `expires_at` (or permanent System User token `0`).
 5. **Emergency Stop Lineage Isolation:** Incomplete, corrupted, or ambiguous recovery lineage classifies as `AMBIGUOUS_RECOVERY` and fails closed immediately without external mutation, never falling through to legacy campaign-only shutdown.
 6. **Audit Event Guarantees:** Audit events in `external_execution_events` are application-level append-only via `ExternalExecutionRepository`, not cryptographically sealed or database-engine immutable.
-7. **Spend Threshold Safeguards:** ₹180 and ₹190 spend thresholds are best-effort monitoring circuit breakers, not guaranteed hard Meta billing caps.
+7. **Spend Threshold Safeguards & Semantics:**
+   - **Approved Allocation:** ₹200.00 ceiling committed for the experiment.
+   - **Warning Threshold:** ₹180.00 (`is_warning=True`) triggers operator alerts.
+   - **Circuit-Breaker Threshold:** ₹190.00 (`is_circuit_breaker_triggered=True`) initiates a best-effort automated emergency pause.
+   - **Reconciliation & Reporting Latency:** Actual spend is reconciled separately via Meta Graph API reporting, which typically experiences 15–60 minute reporting latency. Because Meta ad delivery continues during this window, overspend beyond ₹190 or ₹200 may occur before a polling-based circuit breaker halts delivery.
+   - **Prepaid Wallet Safeguard:** The prepaid Meta ad wallet balance (₹200.00) serves as an additional downstream account safeguard against runaway post-paid billing, but is not an exact real-time per-flight billing cutoff.
+   - **No Guaranteed ₹200 Maximum Cap:** The system does NOT guarantee that spend will never exceed ₹200.00; thresholds are best-effort polling circuit breakers.
 8. **Telemetry Contract:** `GUIDE_ACCESS` represents a server-observed beacon request, not a verified human visitor, reading, conversion, or revenue.
 
 ---
@@ -4813,7 +4831,7 @@ Live execution requires an explicit, separate human launch authorization.
 ---
 
 ### 3. Exact Conditions Required Before Any Live Deployment
-1. **Meta Developer App Live Mode:** Operator must transition Meta App `1063651013045060` from Development Mode to Live Mode in the Meta for Developers portal (`developers.facebook.com/apps/1063651013045060`).
+1. **Meta Developer App Live Mode Verification:** Re-verify that Meta App `1063651013045060` operates in Live Mode for ad creative publishing (switched to Live Mode by operator on Nov 2, 2026 in Step 90.10, but unverified for end-to-end flight mutations).
 2. **App Access Token Configuration:** `META_APP_ACCESS_TOKEN` must be configured in environment to allow `/debug_token` inspection.
 3. **Explicit Operator Authorization:** Operator must explicitly supply authorized dispatch confirmation (`"AUTHORIZE LIVE LAUNCH"`).
 4. **Targeted SAFE_MODE Ungating:** SAFE_MODE must be un-gated strictly for that single authorized execution.
@@ -4824,14 +4842,116 @@ Live execution requires an explicit, separate human launch authorization.
 
 ---
 
+## Step 90.12.12 — Diff Provenance & Documentation Consistency Audit
+
+- Strictly read-only audit of the working tree across Steps 90.12.1–90.12.11.
+- Validated modification provenance across all 6 modified files: `external_execution.py` (repository), `meta.py`, `dispatch.py`, `models/external_execution.py`, `test_dispatch_service.py`, and `test_meta_recovery_option_b.py`.
+- Resolved documentation discrepancies regarding test counts and uncommitted working-tree state.
+
+---
+
+## Step 90.12.13 — SAFE_MODE Override & Mutation Boundary Hardening
+
+- **Defect Identified:** Found ternary assignment `effective_safe_mode = is_safe_mode() if safe_mode is None else safe_mode` in dispatch and recovery methods, which allowed callers to pass `safe_mode=False` to bypass the environment-level `VENTUREBOT_SAFE_MODE=true` setting.
+- **Defect Identified:** Legacy `MetaExperimentDispatchService._emergency_stop()` lacked multi-factor campaign ownership checks, account ID validation, and safe-mode guards, which could execute live `pause_campaign` calls without ownership verification.
+- **Non-Bypassable Mutation Guard:**
+  - Hardened `is_safe_mode()` in `backend/venturebot/env.py` to catch all exceptions and fail closed (`return True`).
+  - Implemented `is_safe_mode_enforced(caller_safe_mode)` in `backend/venturebot/execution/dispatch.py`: in production runtime, caller `safe_mode=False` is rejected and overridden by `VENTUREBOT_SAFE_MODE=true`. Fails closed on any error.
+  - Added `_TestHarnessContext` context manager for automated test suites testing mocked execution components, strictly isolated from production configuration.
+  - Replaced all `effective_safe_mode` evaluation points in `deploy_recovery_dormant`, `activate_recovery_flight`, `lock_schedule`, `dispatch`, and `_dispatch_from_gateway`.
+- **Direct Adapter Write Guard:**
+  - Added `MetaApiSafetyError` in `backend/venturebot/execution/meta.py`.
+  - In `MetaMarketingApiAdapter._execute_request(req, is_write=True)`, all 12 adapter-level write methods raise `MetaApiSafetyError` if `_transport is None` while `VENTUREBOT_SAFE_MODE` is active.
+- **Emergency-Stop Boundary:**
+  - Narrow exception retained for `ExecutionDispatchService.emergency_pause_adset()` solely as a loss-mitigation measure to halt ad spend on verified resources.
+  - Requires `explicit_auth=True` and multi-factor campaign ownership verification. Issues only `status=PAUSED` mutations (never creates or activates resources). If caller explicitly specifies `safe_mode=True`, fails closed.
+  - Legacy `MetaExperimentDispatchService._emergency_stop()` fails closed with `SAFE_MODE_ENABLED` while `SAFE_MODE` is active in production.
+- **Hermetic Test Verification:**
+  - Added `tests/test_safe_mode_boundary.py` covering all 8 Task E requirements.
+  - Total passing tests: 626 (all passing, 0 failures, 0 errors).
+  - Python compilation: 100% clean across all modified files.
+  - Zero live Meta API mutations made, ₹0 new spend, SAFE_MODE=True preserved.
+
+---
+
+## Step 90.12.14 — Adapter-Level SAFE_MODE Enforcement & Test Harness Isolation Audit
+
+- **Vulnerability Identified in Adapter Boundary:**
+  - In `MetaMarketingApiAdapter._execute_request(req, is_write=False)`, mutation blocking previously evaluated `if is_write and self._transport is None:`.
+  - An adapter configured or injected with a valid HTTP transport (such as production `urllib.request` or an HTTP client) was able to execute live mutations even when `VENTUREBOT_SAFE_MODE=true` was active in the environment.
+- **Adapter-Level Hardening (`MetaMarketingApiAdapter`):**
+  - Updated `_execute_request()` in `backend/venturebot/execution/meta.py` to classify mutations as `is_mutation = is_write or (method in ("POST", "PUT", "DELETE", "PATCH"))`.
+  - When `is_mutation` and `is_safe_mode()` is True, the adapter unconditionally raises `MetaApiSafetyError("Live Meta write operations are strictly disabled in Step 36 while VENTUREBOT_SAFE_MODE is active. Direct adapter mutation prohibited.")` **before** any transport lookup, invocation, or socket allocation.
+  - Transport presence or configuration cannot bypass the safety gate.
+  - Read-only operations (`GET`) remain permitted to pass through to the configured transport for introspection/reading.
+- **Production Code Isolation & Backdoor Removal:**
+  - Audited `_TestHarnessContext` in `backend/venturebot/execution/dispatch.py`. Recognized that embedding a test harness bypass inside production code creates a severe security risk.
+  - Completely deleted `_TestHarnessContext` from `backend/venturebot/execution/dispatch.py`.
+  - Deleted `tests/conftest.py` (which previously injected `_TestHarnessContext.enable()` globally).
+  - Standardized mock test suites (`test_dispatch_service.py`, `test_meta_reconciliation.py`, `test_meta_recovery_option_b.py`, `test_execution_dispatch.py`, `test_meta_execution_contract.py`) to use standard pytest `monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")` fixtures for unit tests with mocked transports, leaving production safety gates pristine.
+- **Conservative Emergency-Stop Policy Decision:**
+  - Evaluated Task E: VentureBot currently lacks an authenticated operator session or cryptographic identity boundary (`explicit_auth` is a caller-supplied boolean, `operator_id` is an untrusted string).
+  - In accordance with the principle of least privilege and fail-closed safety, emergency pause mutations are **not exempted** from SAFE_MODE.
+  - When `SAFE_MODE=True`, both `emergency_pause_adset()` and legacy `_emergency_stop()` fail closed with rejection reason `SAFE_MODE_ENABLED: Live Meta emergency pause is disabled in safe mode. Emergency pause is unavailable until a trustworthy authorization boundary exists.`
+  - Zero remote mutation pathways exist while SAFE_MODE is active.
+- **Harness Verification & Test Results:**
+  - Created `RecordingFakeTransport` harness in `tests/test_safe_mode_boundary.py` tracking total, read, and write calls.
+  - Implemented 9 dedicated boundary tests covering:
+    1. Direct adapter POST blocked with configured transport (`write_count == 0`).
+    2. Direct adapter PUT blocked with configured transport (`write_count == 0`).
+    3. Direct adapter DELETE blocked with configured transport (`write_count == 0`).
+    4. Direct adapter PATCH blocked with configured transport (`write_count == 0`).
+    5. Adapter GET permitted through configured transport (`read_count == 1`, `write_count == 0`).
+    6. Dispatch `deploy_recovery_dormant` blocked with configured transport (`write_count == 0`).
+    7. Dispatch `activate_recovery_flight` blocked with configured transport (`write_count == 0`).
+    8. Dispatch `lock_schedule` blocked with configured transport (`write_count == 0`).
+    9. Emergency pause blocked under SAFE_MODE without external writes (`write_count == 0`).
+  - Full test suite: **627 passed, 0 failed in 7.24s**.
+  - Python byte compilation: 100% clean across all modules (`compileall backend tests -q`).
+  - Zero live Meta API mutations made, ₹0.00 spent.
+
+---
+
+## Step 90.12.15 — Independent Full Code Audit & Defect Fixes
+
+- **Comprehensive Repository-Wide Engineering Audit:**
+  - Conducted an independent engineering audit of the entire VentureBot repository (backend source, repositories, execution and dispatch services, Meta adapter, pilot/measurement, capital ledger, env configuration, tests, and canonical docs).
+  - Investigated 14 critical defect areas identified in audit guidelines.
+- **Defects Identified and Fixed:**
+  1. **Defect 1 (HIGH) — Replay Prevention Ineffectiveness in Real Production Lineage:**
+     - *Root Cause:* In Step 90.12.10, replay prevention only checked `f"-ADSET-v{version}" in str(e.new_resource_id or "")`. In production, Meta ad set IDs are purely numeric IDs (e.g. `120252176299999999`), meaning the version name was never stored in `new_resource_id`.
+     - *Fix:* `deploy_recovery_dormant` now captures `replacement_name` and `version` in `api_request_summary` and `reason` during `RESOURCE_CREATED` and `RESOURCE_ADOPTED`. Replay prevention checks `new_resource_id`, `reason`, and `api_request_summary` for version identifiers and `RESOURCE_SUPERSEDED` events.
+  2. **Defect 2 (HIGH) — False-Positive Token Scope Authorization Failure with Formatted Account IDs:**
+     - *Root Cause:* In `MetaMarketingApiAdapter.inspect_token()`, account IDs with leading/trailing whitespace failed prefix stripping (`.removeprefix("act_")`), producing invalid targets like `"act_act_1985595022114520"`.
+     - *Fix:* Stripped whitespace before prefix stripping and wired in `validate_meta_account_id()`, ensuring legitimate formatted account IDs match correctly and malformed IDs fail closed immediately.
+  3. **Defect 3 (MEDIUM) — Unvalidated Account ID Normalization in Adapter & Execution Spec:**
+     - *Root Cause:* `MetaMarketingApiAdapter.normalize_ad_account_id()` and `MetaExecutionSpecification.validate_ad_account_id()` allowed repeated prefixes (`act_act_`), punctuation, letters, or Unicode numerals.
+     - *Fix:* Re-exported and integrated strict `validate_meta_account_id()` across both boundaries, requiring ASCII digits only and rejecting repeated prefixes or punctuation, while preserving backward compatibility for empty/whitespace checks.
+  4. **Defect 4 (MEDIUM) — Inconsistent SAFE_MODE Check in Legacy Emergency Stop:**
+     - *Root Cause:* Legacy `MetaExperimentDispatchService._emergency_stop()` evaluated raw `is_safe_mode()` instead of `is_safe_mode_enforced(safe_mode)`. If `VENTUREBOT_SAFE_MODE=false` was set in the environment, an operator passing `safe_mode=True` would not have had SAFE_MODE enforced.
+     - *Fix:* Updated `_emergency_stop` to evaluate `is_safe_mode_enforced(safe_mode)`.
+  5. **Defect 5 (LOW) — Secret Sanitizer Redaction Gaps Across Query Params and JSON:**
+     - *Root Cause:* Prior sanitizer was inlined with partial regexes in `dispatch.py`, missing JSON bodies and certain query param patterns.
+     - *Fix:* Centralized `sanitize_error` in `meta.py` (re-exported in `dispatch.py`) covering URL parameters (`input_token`, `access_token`), Bearer headers, `appsecret_proof`, and JSON keys.
+  6. **Defect 6 (LOW) — Recovery Lineage Classification Version Name Check Limited to `adset_id`:**
+     - *Root Cause:* `classify_execution_lineage()` checked `"-ADSET-v" in (execution.adset_id or "")`. Because production ad sets have numeric IDs, recovery executions could be misclassified if event history was not checked.
+     - *Fix:* Updated `has_versioned_name` in `classify_execution_lineage()` to inspect `execution.adset_id` as well as event `reason` and `api_request_summary`.
+- **Test Suite Expansion & Verification:**
+  - Created `tests/test_audit_defect_fixes.py` with 7 comprehensive regression tests covering all 6 defect fixes.
+  - Full test suite: **634 passed, 0 failed in 7.80s**.
+  - Python byte compilation: 100% clean (`compileall backend tests -q`).
+  - Zero live Meta API mutations made, ₹0.00 spent.
+
+---
+
 ### 4. Current Unresolved Blockers
-1. **Meta Developer App Mode:** App `1063651013045060` remains in Development Mode (requires human operator action in Meta Developer Portal).
+1. **Meta Developer App Live Mode (Status: UNVERIFIED):** The operator reported the app was switched to Live Mode on November 2, 2026 (Step 90.10). However, end-to-end creative post creation has not been re-tested since the Step 90.1 failure (`subcode 1885183`). Live mode operation remains UNVERIFIED until validated in preflight or during an authorized live launch.
 2. **Token Inspector Credential:** `META_APP_ACCESS_TOKEN` is not yet configured in local environment (fails `/debug_token` preflight).
-3. **Trusted Operator Authentication / RBAC:** VentureBot lacks a cryptographic or session-bound operator identity provider (blocks all recovery versions above 2).
+3. **Trusted Operator Authentication / RBAC:** VentureBot lacks a cryptographic or session-bound operator identity provider (blocks all recovery versions above 2 and emergency stop un-gating).
 
 ---
 
 ### Final Classification
-**STEP 90.12.11 COMPLETE — RECOVERY ARCHITECTURE FROZEN & RECONCILED**
+**STEP 90.12.15 COMPLETE — INDEPENDENT CODE AUDIT & DEFECT FIXES VERIFIED**
 
 

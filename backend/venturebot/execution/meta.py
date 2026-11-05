@@ -21,6 +21,7 @@ from decimal import Decimal
 from enum import Enum
 import json
 import os
+import re
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -29,9 +30,16 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from venturebot.env import is_safe_mode
+
 
 class MetaApiError(RuntimeError):
     """Base exception for Meta Marketing API failures."""
+    pass
+
+
+class MetaApiSafetyError(MetaApiError):
+    """Raised when a live Meta write mutation is attempted while SAFE_MODE is active."""
     pass
 
 
@@ -76,6 +84,78 @@ class LookupResult(BaseModel):
     resource_id: str | None = None
     details: dict[str, Any] | None = None
     error_message: str | None = None
+
+
+class TokenStatus(str, Enum):
+    """Categorized validity and lifecycle status of a Meta access token."""
+
+    VALID = "VALID"
+    EXPIRED = "EXPIRED"
+    NEAR_EXPIRY = "NEAR_EXPIRY"
+    INVALID = "INVALID"
+    INSPECTION_UNAVAILABLE = "INSPECTION_UNAVAILABLE"
+
+
+class TokenInspectionResult(BaseModel):
+    """Structured result of proactive Meta access token inspection."""
+
+    status: TokenStatus
+    is_valid: bool = False
+    expires_at: datetime | None = None
+    remaining_seconds: float | None = None
+    data_access_expires_at: datetime | None = None
+    app_id: str | None = None
+    type: str | None = None
+    user_id: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    granular_scopes: list[dict[str, Any]] = Field(default_factory=list)
+    rejection_reason: str | None = None
+    inspector_type: str | None = None
+
+
+def sanitize_error(error_msg: Any) -> str:
+    """Strip access tokens and sensitive credentials from error strings across query params and JSON."""
+    cleaned = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer [REDACTED]", str(error_msg))
+    cleaned = re.sub(r"access_token=[^&\s]+", "access_token=[REDACTED]", cleaned)
+    cleaned = re.sub(r"input_token=[^&\s]+", "input_token=[REDACTED]", cleaned)
+    cleaned = re.sub(r"appsecret_proof=[^&\s]+", "appsecret_proof=[REDACTED]", cleaned)
+    cleaned = re.sub(
+        r'("(?:access_token|input_token|appsecret_proof)"\s*:\s*")[^"]+(")',
+        r'\1[REDACTED]\2',
+        cleaned,
+    )
+    return cleaned
+
+
+def validate_meta_account_id(val: Any) -> str | None:
+    """Strictly validate and normalize a Meta ad account ID.
+
+    Requirements:
+    - Accept strings only. Reject integers, floats, booleans, lists, dictionaries, and None.
+    - Trim surrounding whitespace.
+    - Accept either a plain numeric account ID or exactly one optional 'act_' prefix.
+    - After removing one optional prefix, require non-empty ASCII digits only (.isascii() and .isdigit()).
+    - Reject letters, punctuation, Unicode numerals, embedded whitespace, and repeated prefixes.
+    - Return the normalized numeric account ID string (without 'act_' prefix) or None if invalid.
+    """
+    if not isinstance(val, str) or isinstance(val, bool):
+        return None
+    trimmed = val.strip()
+    if not trimmed:
+        return None
+
+    if trimmed.startswith("act_"):
+        trimmed = trimmed[4:]
+        if trimmed.startswith("act_"):
+            return None
+
+    if not trimmed:
+        return None
+
+    if not (trimmed.isascii() and trimmed.isdigit()):
+        return None
+
+    return trimmed
 
 
 def inr_to_paise(amount: Decimal) -> int:
@@ -257,16 +337,24 @@ class MetaExecutionSpecification(BaseModel):
     special_ad_categories: list[str] = Field(default_factory=lambda: ["NONE"], description="Mandatory special ad categories array")
     status: str = Field(default="PAUSED", description="Creation status (must be PAUSED)")
     explicit_dispatch_authorized: bool = Field(default=False, description="Explicit operator authorization flag")
+    authorized_recovery_version: int | None = Field(
+        default=None,
+        description="Explicit operator authorization for recovery version if incrementing beyond version 2",
+    )
 
     @field_validator("ad_account_id")
     @classmethod
     def validate_ad_account_id(cls, v: str) -> str:
-        clean = v.strip() if v else ""
+        clean = v.strip() if isinstance(v, str) else ""
         if not clean:
             raise ValueError("ad_account_id must not be empty or whitespace.")
-        if clean.startswith("act_"):
-            return clean
-        return f"act_{clean}"
+        norm = validate_meta_account_id(v)
+        if norm is None:
+            raise ValueError(
+                f"Invalid Meta ad account ID: {v!r}. "
+                "Must be a string containing only ASCII digits with an optional single 'act_' prefix."
+            )
+        return f"act_{norm}"
 
     @field_validator("page_id", "primary_text", "headline")
     @classmethod
@@ -404,25 +492,43 @@ class MetaMarketingApiAdapter:
         self,
         ad_account_id: str | None = None,
         access_token: str | None = None,
+        inspector_access_token: str | None = None,
+        expected_app_id: str | None = None,
         api_version: str = DEFAULT_GRAPH_API_VERSION,
         timeout: float = DEFAULT_TIMEOUT,
         transport: Callable[[urllib.request.Request, float], bytes] | None = None,
+        allow_self_inspection: bool = False,
     ):
         self.ad_account_id = ad_account_id or os.getenv("META_AD_ACCOUNT_ID")
         self._access_token = access_token or os.getenv("META_ACCESS_TOKEN")
+        self._inspector_access_token = (
+            inspector_access_token
+            or os.getenv("META_APP_ACCESS_TOKEN")
+            or os.getenv("META_INSPECTOR_ACCESS_TOKEN")
+        )
+        self.expected_app_id = (
+            expected_app_id
+            or os.getenv("META_APP_ID")
+            or "1063651013045060"
+        )
+        self.allow_self_inspection = allow_self_inspection
         self.api_version = api_version.strip() if api_version else self.DEFAULT_GRAPH_API_VERSION
         self.timeout = timeout
         self._transport = transport
 
     @classmethod
     def normalize_ad_account_id(cls, ad_account_id: str) -> str:
-        """Normalize ad account ID to ensure canonical 'act_' prefix."""
-        clean = ad_account_id.strip() if ad_account_id else ""
+        """Normalize ad account ID to ensure canonical 'act_' prefix with strict ASCII digit validation."""
+        clean = ad_account_id.strip() if isinstance(ad_account_id, str) else ""
         if not clean:
             raise ValueError("ad_account_id must not be empty or whitespace.")
-        if clean.startswith("act_"):
-            return clean
-        return f"act_{clean}"
+        norm = validate_meta_account_id(ad_account_id)
+        if norm is None:
+            raise ValueError(
+                f"Invalid Meta ad account ID: {ad_account_id!r}. "
+                "Must be a string containing only ASCII digits with an optional single 'act_' prefix."
+            )
+        return f"act_{norm}"
 
     @staticmethod
     def _parse_json_dict(payload: dict[str, Any] | str) -> dict[str, Any]:
@@ -1067,14 +1173,27 @@ class MetaMarketingApiAdapter:
     def _execute_request(self, req: urllib.request.Request, is_write: bool = False) -> str:
         """Execute an HTTP request using custom transport or urllib.request.urlopen.
 
-        SAFETY GUARD:
-        - If is_write is True and self._transport is None, live write operations are strictly blocked.
+        ADAPTER-LEVEL SAFE_MODE & STEP 36 SAFETY GUARDS:
+        1. Fail-closed: If is_write is True or HTTP method is POST, PUT, DELETE, or PATCH:
+           When is_safe_mode() is True, mutation is unconditionally blocked before transport execution,
+           regardless of whether a transport is None, configured, or injected.
+        2. Fail-closed: If is_safe_mode() is False but self._transport is None, live write operations
+           are blocked (Step 36 guard requiring mock transport for write testing).
         """
-        if is_write and self._transport is None:
-            raise MetaApiError(
-                "Live Meta write operations are strictly disabled in Step 36. "
-                "A mock transport must be provided to test write operations."
-            )
+        method = req.get_method().upper() if req.get_method() else "GET"
+        is_mutation = is_write or method in ("POST", "PUT", "DELETE", "PATCH")
+
+        if is_mutation:
+            if is_safe_mode():
+                raise MetaApiSafetyError(
+                    "Live Meta write operations are strictly disabled in Step 36 while VENTUREBOT_SAFE_MODE is active. "
+                    "Direct adapter mutation prohibited."
+                )
+            if self._transport is None:
+                raise MetaApiError(
+                    "Live Meta write operations are strictly disabled in Step 36. "
+                    "A mock transport must be provided to test write operations."
+                )
 
         try:
             if self._transport is not None:
@@ -2262,7 +2381,7 @@ class MetaMarketingApiAdapter:
         if not target_token or not target_token.strip():
             raise ValueError("META_ACCESS_TOKEN is required.")
 
-        fields = "id,name,status,effective_status"
+        fields = "id,name,status,effective_status,account_id"
         url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/{clean_id}?fields={fields}"
         req = urllib.request.Request(
             url,
@@ -2278,4 +2397,321 @@ class MetaMarketingApiAdapter:
         if "error" in data and isinstance(data["error"], dict):
             self._handle_meta_error_envelope(data["error"])
         return data
+
+    def inspect_token(
+        self,
+        access_token: str | None = None,
+        inspector_token: str | None = None,
+        flight_duration_hours: float = 48.0,
+        safety_buffer_hours: float = 24.0,
+        expected_app_id: str | None = None,
+        target_ad_account_id: str | None = None,
+        allow_self_inspection: bool | None = None,
+    ) -> TokenInspectionResult:
+        """Proactively inspect Meta access token validity, metadata, and expiration via /debug_token.
+
+        Invariants:
+        1. Target token string is validated non-empty.
+        2. Requires an authorized inspector credential (App Access Token or developer token)
+           unless allow_self_inspection is explicitly permitted.
+        3. Fails closed on any network, parsing, or HTTP error with INSPECTION_UNAVAILABLE.
+        4. Validates app_id matches expected Meta App ID.
+        5. Validates token type is compatible with advertising operations (SYSTEM_USER, SYSTEM, USER).
+        6. Validates required permission scopes ('ads_management', 'ads_read').
+        7. Validates granular_scopes target IDs include target ad account if restricted.
+        8. Validates data_access_expires_at if returned.
+        9. Validates actual expiration timestamp against (flight_duration_hours + safety_buffer_hours).
+        10. Permanent tokens (expires_at == 0) are accepted only when all other metadata checks pass.
+        11. Does NOT log or expose tokens or credentials.
+        """
+        target_token = access_token or self._access_token
+        if not target_token or not target_token.strip():
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                rejection_reason="META_ACCESS_TOKEN is missing or empty.",
+            )
+
+        clean_token = target_token.strip()
+        active_inspector = inspector_token or self._inspector_access_token
+        can_self = self.allow_self_inspection if allow_self_inspection is None else allow_self_inspection
+
+        if not active_inspector:
+            if not can_self:
+                return TokenInspectionResult(
+                    status=TokenStatus.INSPECTION_UNAVAILABLE,
+                    is_valid=False,
+                    rejection_reason=(
+                        "UNVERIFIED_INSPECTOR_AUTHENTICATION: Meta /debug_token requires an App Access Token "
+                        "(META_APP_ACCESS_TOKEN) or authorized inspector credential. System User self-inspection "
+                        "is unverified on live Meta API."
+                    ),
+                )
+            active_inspector = clean_token
+            inspector_type = "SELF_INSPECTION"
+        else:
+            inspector_type = "APP_ACCESS_TOKEN"
+
+        url = f"{self.GRAPH_API_BASE_URL}/{self.api_version}/debug_token?input_token={clean_token}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {active_inspector}",
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+
+        try:
+            text = self._execute_request(req, is_write=False)
+            data = self._parse_json_dict(text)
+        except Exception as e:
+            safe_err = sanitize_error(str(e))
+            return TokenInspectionResult(
+                status=TokenStatus.INSPECTION_UNAVAILABLE,
+                is_valid=False,
+                rejection_reason=f"Token inspection request failed: {safe_err}",
+            )
+
+        if "error" in data and isinstance(data["error"], dict):
+            err_msg = data["error"].get("message", "Unknown token error")
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                rejection_reason=f"Meta rejected token: {err_msg}",
+            )
+
+        token_data = data.get("data")
+        if not isinstance(token_data, dict):
+            return TokenInspectionResult(
+                status=TokenStatus.INSPECTION_UNAVAILABLE,
+                is_valid=False,
+                rejection_reason="Malformed debug_token response: missing 'data' envelope.",
+            )
+
+        is_valid = bool(token_data.get("is_valid", False))
+        if not is_valid:
+            err_dict = token_data.get("error", {})
+            err_msg = err_dict.get("message", "Token is reported as not valid.") if isinstance(err_dict, dict) else "Token is invalid."
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                rejection_reason=err_msg,
+            )
+
+        token_app_id = str(token_data.get("app_id") or "").strip()
+        target_app = expected_app_id or self.expected_app_id
+        if not token_app_id:
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                rejection_reason="debug_token response missing required 'app_id'.",
+            )
+        if target_app and token_app_id != target_app:
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                app_id=token_app_id,
+                rejection_reason=f"Token app_id '{token_app_id}' does not match expected '{target_app}'.",
+            )
+
+        token_type = str(token_data.get("type") or "").strip().upper()
+        if not token_type:
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                app_id=token_app_id,
+                rejection_reason="debug_token response missing required 'type'.",
+            )
+        allowed_types = {"SYSTEM_USER", "SYSTEM", "USER"}
+        if token_type not in allowed_types:
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                app_id=token_app_id,
+                type=token_type,
+                rejection_reason=f"Incompatible token type '{token_type}'. Expected one of {sorted(allowed_types)}.",
+            )
+
+        user_id = str(token_data.get("user_id") or "") or None
+        scopes = token_data.get("scopes", [])
+        if not isinstance(scopes, list):
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                app_id=token_app_id,
+                type=token_type,
+                rejection_reason="debug_token response 'scopes' must be a list.",
+            )
+
+        required_scopes = {"ads_management", "ads_read"}
+        missing_scopes = required_scopes - set(scopes)
+        if missing_scopes:
+            return TokenInspectionResult(
+                status=TokenStatus.INVALID,
+                is_valid=False,
+                app_id=token_app_id,
+                type=token_type,
+                scopes=scopes,
+                rejection_reason=f"Token is missing required permission scopes: {sorted(missing_scopes)}.",
+            )
+
+        granular_scopes = token_data.get("granular_scopes")
+        if granular_scopes and isinstance(granular_scopes, list):
+            target_acc = target_ad_account_id or self.ad_account_id
+            if target_acc is not None:
+                norm_acc = validate_meta_account_id(target_acc)
+                if norm_acc is None:
+                    return TokenInspectionResult(
+                        status=TokenStatus.INVALID,
+                        is_valid=False,
+                        app_id=token_app_id,
+                        type=token_type,
+                        scopes=scopes,
+                        granular_scopes=granular_scopes,
+                        rejection_reason=f"Target ad account ID {target_acc!r} is malformed or invalid.",
+                    )
+                plain_acc = norm_acc
+                act_acc = f"act_{norm_acc}"
+                for entry in granular_scopes:
+                    if isinstance(entry, dict) and entry.get("scope") in required_scopes:
+                        target_ids = entry.get("target_ids")
+                        if target_ids is not None and isinstance(target_ids, list):
+                            allowed_targets = {str(t).strip() for t in target_ids}
+                            if plain_acc not in allowed_targets and act_acc not in allowed_targets:
+                                return TokenInspectionResult(
+                                    status=TokenStatus.INVALID,
+                                    is_valid=False,
+                                    app_id=token_app_id,
+                                    type=token_type,
+                                    scopes=scopes,
+                                    granular_scopes=granular_scopes,
+                                    rejection_reason=(
+                                        f"Ad account '{target_acc}' is not authorized in granular_scopes "
+                                        f"for scope '{entry.get('scope')}'. Allowed targets: {sorted(allowed_targets)}."
+                                    ),
+                                )
+
+        now_utc = datetime.now(timezone.utc)
+        required_hours = flight_duration_hours + safety_buffer_hours
+        required_seconds = required_hours * 3600.0
+
+        da_raw = token_data.get("data_access_expires_at")
+        da_dt = None
+        if da_raw is not None:
+            if not isinstance(da_raw, (int, float)):
+                return TokenInspectionResult(
+                    status=TokenStatus.INSPECTION_UNAVAILABLE,
+                    is_valid=False,
+                    app_id=token_app_id,
+                    type=token_type,
+                    rejection_reason=f"Invalid data_access_expires_at format: {da_raw!r}",
+                )
+            if da_raw > 0:
+                da_dt = datetime.fromtimestamp(da_raw, tz=timezone.utc)
+                da_rem = (da_dt - now_utc).total_seconds()
+                if da_rem <= 0:
+                    return TokenInspectionResult(
+                        status=TokenStatus.EXPIRED,
+                        is_valid=False,
+                        app_id=token_app_id,
+                        type=token_type,
+                        scopes=scopes,
+                        data_access_expires_at=da_dt,
+                        rejection_reason=f"Data access expired at {da_dt.isoformat()}.",
+                    )
+                if da_rem < required_seconds:
+                    da_hrs = da_rem / 3600.0
+                    return TokenInspectionResult(
+                        status=TokenStatus.NEAR_EXPIRY,
+                        is_valid=False,
+                        app_id=token_app_id,
+                        type=token_type,
+                        scopes=scopes,
+                        data_access_expires_at=da_dt,
+                        remaining_seconds=da_rem,
+                        rejection_reason=(
+                            f"Data access remaining validity of {da_hrs:.1f}h is insufficient. "
+                            f"Requires at least {required_hours:.1f}h."
+                        ),
+                    )
+
+        expires_at_raw = token_data.get("expires_at")
+        if expires_at_raw == 0:
+            return TokenInspectionResult(
+                status=TokenStatus.VALID,
+                is_valid=True,
+                expires_at=None,
+                data_access_expires_at=da_dt,
+                remaining_seconds=None,
+                app_id=token_app_id,
+                type=token_type,
+                user_id=user_id,
+                scopes=scopes,
+                granular_scopes=granular_scopes if isinstance(granular_scopes, list) else [],
+                inspector_type=inspector_type,
+            )
+
+        if not isinstance(expires_at_raw, (int, float)):
+            return TokenInspectionResult(
+                status=TokenStatus.INSPECTION_UNAVAILABLE,
+                is_valid=False,
+                app_id=token_app_id,
+                type=token_type,
+                rejection_reason=f"Invalid expires_at format in debug_token: {expires_at_raw!r}",
+            )
+
+        expires_at_dt = datetime.fromtimestamp(expires_at_raw, tz=timezone.utc)
+        remaining_seconds = (expires_at_dt - now_utc).total_seconds()
+
+        if remaining_seconds <= 0:
+            return TokenInspectionResult(
+                status=TokenStatus.EXPIRED,
+                is_valid=False,
+                expires_at=expires_at_dt,
+                data_access_expires_at=da_dt,
+                remaining_seconds=remaining_seconds,
+                app_id=token_app_id,
+                type=token_type,
+                user_id=user_id,
+                scopes=scopes,
+                granular_scopes=granular_scopes if isinstance(granular_scopes, list) else [],
+                inspector_type=inspector_type,
+                rejection_reason=f"Token expired at {expires_at_dt.isoformat()}.",
+            )
+
+        if remaining_seconds < required_seconds:
+            remaining_hrs = remaining_seconds / 3600.0
+            return TokenInspectionResult(
+                status=TokenStatus.NEAR_EXPIRY,
+                is_valid=False,
+                expires_at=expires_at_dt,
+                data_access_expires_at=da_dt,
+                remaining_seconds=remaining_seconds,
+                app_id=token_app_id,
+                type=token_type,
+                user_id=user_id,
+                scopes=scopes,
+                granular_scopes=granular_scopes if isinstance(granular_scopes, list) else [],
+                inspector_type=inspector_type,
+                rejection_reason=(
+                    f"Token remaining validity of {remaining_hrs:.1f}h is insufficient. "
+                    f"Requires at least {required_hours:.1f}h (flight: {flight_duration_hours:.1f}h + buffer: {safety_buffer_hours:.1f}h)."
+                ),
+            )
+
+        return TokenInspectionResult(
+            status=TokenStatus.VALID,
+            is_valid=True,
+            expires_at=expires_at_dt,
+            data_access_expires_at=da_dt,
+            remaining_seconds=remaining_seconds,
+            app_id=token_app_id,
+            type=token_type,
+            user_id=user_id,
+            scopes=scopes,
+            granular_scopes=granular_scopes if isinstance(granular_scopes, list) else [],
+            inspector_type=inspector_type,
+        )
 

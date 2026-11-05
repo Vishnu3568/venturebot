@@ -74,7 +74,14 @@ def is_safe_mode() -> bool:
     Checked via VENTUREBOT_SAFE_MODE environment variable.
     Defaults to True (blocking all real write actions) unless explicitly set to
     'false', '0', or 'no'.
+    Fails closed (returns True) on any parsing or environment inspection error.
     """
-    raw = os.environ.get("VENTUREBOT_SAFE_MODE", "true").strip().lower()
-    return raw not in ("false", "0", "no")
+    try:
+        raw = os.environ.get("VENTUREBOT_SAFE_MODE", "true")
+        if not isinstance(raw, str):
+            return True
+        clean = raw.strip().lower()
+        return clean not in ("false", "0", "no")
+    except Exception:
+        return True  # Fail closed
 

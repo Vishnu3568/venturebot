@@ -559,11 +559,15 @@ External Platform (Meta Graph API)
   1. Be invoked exclusively by `ExecutionDispatchService`, OR
   2. Embed an explicit `is_safe_mode()` check before initiating any remote write or reconciliation operation.
 
-### 4. SAFE_MODE Semantics
-- `VENTUREBOT_SAFE_MODE` defaults to `True`.
-- When `True`, all write dispatches are unconditionally blocked with `{success: False, blocked: True, reason: "SAFE_MODE_ENABLED"}`.
-- Setting `VENTUREBOT_SAFE_MODE=false` **NEVER** authorizes execution on its own. All domain prerequisites (approved status, budget ceilings, explicit operator authorization, account preflight, and deterministic reconciliation) remain mandatory.
-- Reconciliation and dispatch operations have strictly **zero financial side effects** on the authoritative capital ledger.
+### 4. SAFE_MODE Semantics & Fail-Closed Adapter Mutation Guard
+- **Authoritative Source:** The environment variable `VENTUREBOT_SAFE_MODE` parsed via `is_safe_mode()` in `backend/venturebot/env.py`. It defaults to `True` unless explicitly set to `'false'`, `'0'`, or `'no'`. Any parsing failure or environment error fails closed to `True`.
+- **Non-Bypassable Mutation Guard:** Implemented in `is_safe_mode_enforced(caller_safe_mode)` in `backend/venturebot/execution/dispatch.py`. In production runtime, passing `safe_mode=False` to any dispatch or mutation method (`deploy_recovery_dormant`, `activate_recovery_flight`, `lock_schedule`, `dispatch`, `_dispatch_from_gateway`, `emergency_pause_adset`) is unconditionally rejected and overridden by `VENTUREBOT_SAFE_MODE=true`.
+- **Elimination of Production Test Bypasses:** In Step 90.12.14, `_TestHarnessContext` was completely removed from `dispatch.py` and `tests/conftest.py` was deleted. Production code contains zero test bypass backdoors. Automated unit test suites testing mocked execution components explicitly use standard pytest `monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")` fixtures scoped strictly to their respective test modules.
+- **Fail-Closed Adapter Boundary Guard:** In `MetaMarketingApiAdapter._execute_request(req, is_write=True)`, all write requests (POST, PUT, DELETE, PATCH, or `is_write=True`) are checked against `is_safe_mode()` **before transport execution**. If `is_safe_mode()` is active, it raises `MetaApiSafetyError` unconditionally, regardless of whether `self._transport` is None, a real HTTP transport, or a configured/injected transport. If safe mode is disabled, an unmocked adapter (`_transport is None`) is independently blocked by the Step 36 guard (`MetaApiError`). Read-only GET requests continue to function.
+- **Conservative Emergency-Stop Policy (Closure):** Because VentureBot currently lacks a cryptographic or session-bound operator identity/authentication boundary (as documented in Step 90.12.10), emergency pause is **NOT** exempted from SAFE_MODE. Under `VENTUREBOT_SAFE_MODE=true`, `ExecutionDispatchService.emergency_pause_adset()` and `MetaExperimentDispatchService._emergency_stop()` fail closed with `SAFE_MODE_ENABLED`. Emergency stop mutations are strictly disabled until a trustworthy, separate authorization boundary exists.
+- **Setting `VENTUREBOT_SAFE_MODE=false` Never Authorizes Mutations:** Disabling SAFE_MODE does not bypass domain prerequisites: approved status, budget ceilings, explicit operator authorization, account preflight, and deterministic reconciliation remain mandatory.
+- **Reconciliation and Financial Invariant:** Reconciliation and dispatch operations have strictly **zero financial side effects** on the authoritative capital ledger.
+- **Remaining RBAC Limitations:** VentureBot currently lacks cryptographic/session-bound operator authentication. Operator IDs remain audited metadata parameters. Higher recovery versions (> 2) remain blocked. Emergency stop remains unavailable in safe mode.
 
 ---
 
@@ -639,6 +643,7 @@ To ensure auditable recovery from interrupted external deployments without mutat
 
 ### 1. Two-Phase Readiness-Gated Recovery (Option B)
 - **Phase 1: Dormant Deployment:** Deploys a deterministic versioned replacement ad set (`-ADSET-v2`) in `PAUSED` status with a 24-hour buffer schedule under the existing campaign. Deploys creative and ad in `PAUSED` status for policy review. Original expired ad sets are preserved completely intact and never modified, deleted, or unpaused. An immutable `RESOURCE_SUPERSEDED` audit event is recorded.
+- **Replay Prevention Invariant:** Once a versioned recovery deployment has executed and generated `RESOURCE_CREATED` or `RESOURCE_ADOPTED` events, repeated creation under the same version is strictly blocked (`RECOVERY_AUTHORIZATION_REPLAY_REJECTED`). Replay checks inspect `new_resource_id`, event `reason`, and `api_request_summary` to account for purely numeric Meta resource IDs.
 - **Phase 2: Readiness-Gated Activation:** Activation strictly requires Meta ad review approval, explicit human authorization, SAFE_MODE un-gated strictly for that single action, verified `₹0.00` actual ledger spend, and a schedule locked to an exact 48.0-hour duration in the future.
 
 ### 2. Multi-Tier Emergency Stop & Exclusive Campaign Ownership
@@ -648,21 +653,32 @@ To ensure auditable recovery from interrupted external deployments without mutat
 ### 3. Lineage Classification & Legacy Fallthrough Prohibition
 - Every emergency stop evaluates `classify_execution_lineage()`:
   - `STANDARD`: Standard execution without recovery markers $\rightarrow$ legacy campaign-only shutdown.
-  - `OPTION_B`: Valid recovery execution with verified lineage $\rightarrow$ 4-tier emergency stop.
+  - `OPTION_B`: Valid recovery execution with verified lineage $\rightarrow$ 4-tier emergency stop. Evaluates both execution `adset_id` and audit event metadata (`reason`, `api_request_summary`) so versioned replacement ad sets are reliably attributed even when `adset_id` is a purely numeric Meta ID.
   - `AMBIGUOUS_RECOVERY`: Incomplete, malformed, circular, or conflicting lineage $\rightarrow$ **fails closed immediately with zero external mutations**. An ambiguous recovery execution must NEVER fall through to legacy campaign-only shutdown.
 
-### 4. Token Inspector Preflight & Redaction
+### 4. Token Inspector Preflight, Account ID Validation & Secret Redaction
 - `/debug_token` inspection requires an authorized App Access Token (`META_APP_ACCESS_TOKEN`) or developer credential. System user self-inspection is unverified and disabled by default.
-- Preflight verifies App ID (`1063651013045060`), compatible type (`SYSTEM_USER`/`USER`), required scopes (`ads_management`, `ads_read`), granular account coverage, and $\ge 72\text{h}$ validity on both `data_access_expires_at` and `expires_at`.
-- All credentials in error messages and URLs are sanitized and redacted.
+- Preflight verifies App ID (`1063651013045060`), compatible type (`SYSTEM_USER`/`USER`), required scopes (`ads_management`, `ads_read`), granular account coverage (normalizing whitespace and `act_` prefixes), and $\ge 72\text{h}$ validity on both `data_access_expires_at` and `expires_at`.
+- **Strict Account ID Validation:** `validate_meta_account_id()` strictly requires ASCII digits only (optional single `act_` prefix) and rejects repeated prefixes (`act_act_`), whitespace, punctuation, letters, or Unicode digits across adapter normalization, execution specifications, and token inspection.
+- **Centralized Credential Sanitization:** `sanitize_error()` centrally redacts sensitive tokens, headers, and proofs (`access_token`, `input_token`, `appsecret_proof`, Bearer tokens) across error messages, URLs, and JSON payloads.
 
-### 5. Recovery Version Trust Boundary
+### 5. Multi-Layer SAFE_MODE Enforcement
+- `is_safe_mode_enforced(safe_mode)` evaluates the environment setting `VENTUREBOT_SAFE_MODE` and guarantees that caller-supplied `safe_mode=False` cannot override an active environment guard, while caller-supplied `safe_mode=True` is always honored even if environment SAFE_MODE is false.
+- `MetaMarketingApiAdapter._execute_request()` raises `MetaApiSafetyError` before calling any transport on all mutation methods (POST, PUT, DELETE, PATCH, `is_write=True`). Transport injection cannot bypass SAFE_MODE.
+
+### 6. Recovery Version Trust Boundary
 - Recovery version 2 is the ONLY currently permitted recovery version.
 - Recovery versions above 2 remain permanently blocked pending the implementation of a trusted operator authentication/RBAC subsystem. Caller-supplied operator IDs are unauthenticated strings and cannot cross the security trust boundary.
 
 ### 6. Operational & Financial Safeguards
 - Audit events in `external_execution_events` provide an **application-level append-only** guarantee, not engine-level immutability.
-- ₹180 and ₹190 spend thresholds are best-effort monitoring circuit breakers, not guaranteed hard Meta billing caps.
+- **Spend Protection Semantics & Thresholds:**
+  - **Approved Allocation:** ₹200.00 ceiling committed for the experiment.
+  - **Warning Threshold:** ₹180.00 (`is_warning=True`) triggers operator alerts.
+  - **Circuit-Breaker Threshold:** ₹190.00 (`is_circuit_breaker_triggered=True`) initiates a best-effort automated emergency pause.
+  - **Reconciliation & Reporting Latency:** Actual spend is reconciled separately via Meta Graph API reporting, which typically experiences 15–60 minute reporting latency. Because Meta ad delivery continues during this window, overspend beyond ₹190 or ₹200 may occur before a polling-based circuit breaker halts delivery.
+  - **Prepaid Wallet Safeguard:** The prepaid Meta ad wallet balance (₹200.00) serves as an additional downstream account safeguard against runaway post-paid billing, but is not an exact real-time per-flight billing cutoff.
+  - **No Guaranteed ₹200 Maximum Cap:** The system does NOT guarantee that spend will never exceed ₹200.00; thresholds are best-effort polling circuit breakers.
 - `GUIDE_ACCESS` telemetry records server-observed edge beacon requests, not verified human visitors, reading, conversions, or revenue.
 
 ---

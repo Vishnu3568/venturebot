@@ -27,6 +27,8 @@ from venturebot.execution.meta import (
     deterministic_campaign_name,
     deterministic_creative_name,
     inr_to_paise,
+    sanitize_error,
+    validate_meta_account_id,
 )
 from venturebot.execution.models import ExecutionResult
 from venturebot.execution.service import ExperimentExecutionService
@@ -58,5 +60,7 @@ __all__ = [
     "deterministic_campaign_name",
     "deterministic_creative_name",
     "inr_to_paise",
+    "sanitize_error",
+    "validate_meta_account_id",
 ]
 

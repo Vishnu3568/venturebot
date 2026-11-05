@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 from typing import Any
 import urllib.request
@@ -37,22 +38,29 @@ from venturebot.database.models import (
     Base,
     ExperimentORM,
     ExternalExecutionEventORM,
+    ExternalExecutionORM,
     OpportunityORM,
 )
 from venturebot.database.repositories.capital import CapitalRepository
 from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.execution.dispatch import (
-    ExecutionDispatchService,
-    RecoveryDormantResult,
-    ReadinessResult,
-    ScheduleLockResult,
     ActivationResult,
     DeliveryVerificationResult,
+    ExecutionDispatchService,
+    MetaExperimentDispatchService,
+    ReadinessResult,
+    RecoveryDormantResult,
+    RecoveryLineageClassification,
+    ScheduleLockResult,
     SpendThresholdStatus,
+    classify_execution_lineage,
+    validate_meta_account_id,
 )
 from venturebot.execution.meta import (
     MetaExecutionSpecification,
     MetaMarketingApiAdapter,
+    TokenInspectionResult,
+    TokenStatus,
     deterministic_ad_name,
     deterministic_adset_name,
     deterministic_campaign_name,
@@ -66,12 +74,21 @@ from venturebot.models.external_execution import (
     ExternalExecutionStatus,
 )
 
+os.environ["META_APP_ACCESS_TOKEN"] = "TEST_APP_ACCESS_TOKEN_SAFE"
+os.environ["META_APP_ID"] = "1063651013045060"
+
 
 SAMPLE_ACCOUNT_ID = "act_1985595022114520"
 SAMPLE_TOKEN = "TEST_SYSTEM_USER_TOKEN_SAFE"
 SAMPLE_CAMPAIGN_ID = "120252176243860380"
 ORIGINAL_ADSET_ID = "120252176254130380"
 SAMPLE_IMAGE_HASH = "d921604e0240ee8329b3b7fe5235abd4"
+
+
+@pytest.fixture(autouse=True)
+def _enable_recovery_mock_testing(monkeypatch: pytest.MonkeyPatch):
+    """Explicitly configure safe mode disabled for Option B mocked recovery tests."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
 
 
 @pytest.fixture
@@ -193,6 +210,26 @@ class MockTransport:
         fail_campaign_readback: bool = False,
         fail_ad_readback: bool = False,
         fail_adset_readback: bool = False,
+        campaign_id_override: str | None = None,
+        campaign_account_id: str | None = None,
+        omit_campaign_account_id: bool = False,
+        omit_campaign_name: bool = False,
+        fail_token_inspection: bool = False,
+        malformed_token_response: bool = False,
+        token_is_invalid: bool = False,
+        token_expired: bool = False,
+        token_near_expiry: bool = False,
+        token_never_expires: bool = False,
+        fail_inspector_auth: bool = False,
+        inspector_wrong_app: bool = False,
+        token_mismatched_app_id: bool = False,
+        incompatible_token_type: bool = False,
+        missing_required_scopes: bool = False,
+        granular_scopes_unauthorized: bool = False,
+        granular_scopes_authorized: bool = False,
+        data_access_expired: bool = False,
+        data_access_near_expiry: bool = False,
+        malformed_data_access: bool = False,
     ):
         self.requests: list[urllib.request.Request] = []
         self.ad_review_status = ad_review_status
@@ -210,6 +247,27 @@ class MockTransport:
         self.fail_campaign_readback = fail_campaign_readback
         self.fail_ad_readback = fail_ad_readback
         self.fail_adset_readback = fail_adset_readback
+        self.campaign_id_override = campaign_id_override
+        self.campaign_account_id = campaign_account_id
+        self.omit_campaign_account_id = omit_campaign_account_id
+        self.omit_campaign_name = omit_campaign_name
+        self.campaign_pause_calls: int = 0
+        self.fail_token_inspection = fail_token_inspection
+        self.malformed_token_response = malformed_token_response
+        self.token_is_invalid = token_is_invalid
+        self.token_expired = token_expired
+        self.token_near_expiry = token_near_expiry
+        self.token_never_expires = token_never_expires
+        self.fail_inspector_auth = fail_inspector_auth
+        self.inspector_wrong_app = inspector_wrong_app
+        self.token_mismatched_app_id = token_mismatched_app_id
+        self.incompatible_token_type = incompatible_token_type
+        self.missing_required_scopes = missing_required_scopes
+        self.granular_scopes_unauthorized = granular_scopes_unauthorized
+        self.granular_scopes_authorized = granular_scopes_authorized
+        self.data_access_expired = data_access_expired
+        self.data_access_near_expiry = data_access_near_expiry
+        self.malformed_data_access = malformed_data_access
 
         now = datetime.now(timezone.utc)
         if schedule_expired:
@@ -231,6 +289,89 @@ class MockTransport:
         url = req.full_url
         data_body = req.data.decode("utf-8") if req.data else ""
 
+        # /debug_token handling
+        if "/debug_token" in url and req.get_method() == "GET":
+            if self.fail_token_inspection:
+                raise RuntimeError("Simulated Meta network failure on debug_token")
+            if self.fail_inspector_auth:
+                return json.dumps({
+                    "error": {
+                        "message": "Invalid OAuth access token - cannot inspect token with invalid inspector credential.",
+                        "type": "OAuthException",
+                        "code": 190,
+                    }
+                }).encode("utf-8")
+            if self.inspector_wrong_app:
+                return json.dumps({
+                    "error": {
+                        "message": "Application does not have permission to inspect this token.",
+                        "type": "OAuthException",
+                        "code": 10,
+                    }
+                }).encode("utf-8")
+            if self.malformed_token_response:
+                return json.dumps({"unexpected": "structure"}).encode("utf-8")
+            if self.token_is_invalid:
+                return json.dumps({
+                    "data": {
+                        "is_valid": False,
+                        "error": {"message": "Invalid OAuth access token."},
+                    }
+                }).encode("utf-8")
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+
+            app_id = "999999999999999" if self.token_mismatched_app_id else "1063651013045060"
+            token_type = "PAGE" if self.incompatible_token_type else "SYSTEM_USER"
+            if self.missing_required_scopes:
+                scopes = ["email", "public_profile"]
+            else:
+                scopes = ["ads_management", "ads_read"]
+
+            granular_scopes = None
+            if self.granular_scopes_unauthorized:
+                granular_scopes = [
+                    {"scope": "ads_management", "target_ids": ["999999999999"]},
+                    {"scope": "ads_read", "target_ids": ["999999999999"]},
+                ]
+            elif self.granular_scopes_authorized:
+                granular_scopes = [
+                    {"scope": "ads_management", "target_ids": ["1985595022114520"]},
+                    {"scope": "ads_read", "target_ids": ["1985595022114520"]},
+                ]
+
+            if self.data_access_expired:
+                da_ts = now_ts - 3600
+            elif self.data_access_near_expiry:
+                da_ts = now_ts + (20 * 3600)
+            elif self.malformed_data_access:
+                da_ts = "not-a-timestamp"
+            else:
+                da_ts = now_ts + (90 * 86400)
+
+            if self.token_expired:
+                exp_ts = now_ts - 3600  # expired 1 hour ago
+            elif self.token_near_expiry:
+                exp_ts = now_ts + (20 * 3600)  # 20 hours remaining (< 72h required)
+            elif self.token_never_expires:
+                exp_ts = 0  # permanent System User token
+            else:
+                exp_ts = now_ts + (90 * 86400)  # 90 days remaining (> 72h required)
+
+            data_obj: dict[str, Any] = {
+                "app_id": app_id,
+                "type": token_type,
+                "application": "VentureBot",
+                "data_access_expires_at": da_ts,
+                "expires_at": exp_ts,
+                "is_valid": True,
+                "scopes": scopes,
+                "user_id": "987654321",
+            }
+            if granular_scopes is not None:
+                data_obj["granular_scopes"] = granular_scopes
+
+            return json.dumps({"data": data_obj}).encode("utf-8")
+
         # Campaign CBO check
         if "is_adset_budget_sharing_enabled" in url:
             return json.dumps({
@@ -243,15 +384,25 @@ class MockTransport:
         if (f"/{SAMPLE_CAMPAIGN_ID}?" in url or url.endswith(f"/{SAMPLE_CAMPAIGN_ID}")) and "/adsets" not in url and req.get_method() == "GET":
             readback_status = "ACTIVE" if self.fail_campaign_readback else self.campaign_status
             c_name = self.campaign_name or f"VB-EXP-49fde874-9387-5056-934c-51a9cfca164f"
-            return json.dumps({
-                "id": SAMPLE_CAMPAIGN_ID,
+            resp_dict: dict[str, Any] = {
+                "id": self.campaign_id_override or SAMPLE_CAMPAIGN_ID,
                 "name": c_name,
                 "status": readback_status,
                 "effective_status": readback_status,
-            }).encode("utf-8")
+            }
+            if not self.omit_campaign_account_id:
+                resp_dict["account_id"] = (
+                    self.campaign_account_id
+                    if self.campaign_account_id is not None
+                    else SAMPLE_ACCOUNT_ID.removeprefix("act_")
+                )
+            if self.omit_campaign_name:
+                resp_dict.pop("name", None)
+            return json.dumps(resp_dict).encode("utf-8")
 
         # Campaign pause / unpause update
         if (f"/{SAMPLE_CAMPAIGN_ID}?" in url or url.endswith(f"/{SAMPLE_CAMPAIGN_ID}")) and "/adsets" not in url and req.data:
+            self.campaign_pause_calls += 1
             if self.fail_campaign_pause and b'"status": "PAUSED"' in req.data:
                 raise RuntimeError("Simulated Meta network failure on campaign pause")
             payload = json.loads(data_body)
@@ -1471,3 +1622,2092 @@ def test_31_emergency_stop_never_passes_unrelated_resource_ids(
         assert target_id in allowed_ids, f"Unrelated target ID '{target_id}' found in request '{url}'"
 
 
+# ── Step 90.12.5: Multi-Factor Campaign Ownership Tests ───────────────────────
+
+def test_32_emergency_stop_exclusive_ownership_permits_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """32. Valid exclusive ownership across DB, lineage, and remote metadata permits campaign pausing."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is True
+    assert res.campaign_status is not None
+    assert res.campaign_status.paused is True
+    assert res.campaign_status.verified is True
+    assert transport.campaign_pause_calls == 1
+
+
+def test_33_emergency_stop_multiple_current_executions_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """33. Multiple execution records referencing the same campaign blocks campaign pause."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Create a second experiment and execution referencing the same campaign ID
+    other_exp = ExperimentORM(
+        id=uuid4(),
+        opportunity_id=approved_experiment.opportunity_id,
+        hypothesis="Duplicate hypothesis",
+        objective="Duplicate objective",
+        channel="facebook",
+        monetization_method="direct_sale",
+        destination_url="https://example.com/duplicate",
+        status=ExperimentStatus.APPROVED.value,
+        allocated_budget=Decimal("200.00"),
+        max_allowed_spend=Decimal("200.00"),
+        actual_spend=Decimal("0.00"),
+        success_criteria="CTR >= 1.5%",
+        failure_criteria="CTR < 0.5%",
+    )
+    session.add(other_exp)
+    session.flush()
+
+    other_exec = ExternalExecutionORM(
+        id=uuid4(),
+        experiment_id=other_exp.id,
+        channel="meta",
+        external_account_id=SAMPLE_ACCOUNT_ID,
+        campaign_id=SAMPLE_CAMPAIGN_ID,
+        status="deployed_dormant",
+    )
+    session.add(other_exec)
+    session.commit()
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert res.campaign_status is not None and res.campaign_status.paused is False
+    assert "distinct current executions" in (res.rejection_reason or "").lower()
+    # Child resources are still safely paused
+    assert res.ad_status is not None and res.ad_status.paused is True
+    assert res.replacement_adset_status is not None and res.replacement_adset_status.paused is True
+
+
+def test_34_emergency_stop_no_current_execution_found_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """34. When repository reports zero matching executions, campaign pause is safely blocked."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Monkeypatch get_by_campaign_id to simulate zero matches
+    monkeypatch.setattr(ExternalExecutionRepository, "get_by_campaign_id", lambda self, cid: [])
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "no current execution records reference campaign" in (res.rejection_reason or "").lower()
+
+
+def test_35_emergency_stop_same_execution_historical_events_permitted(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """35. Historical audit events belonging to the same execution do not block campaign pausing."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    deploy_res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert deploy_res.execution is not None
+
+    repo = ExternalExecutionRepository(session)
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=deploy_res.execution.id,
+            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+            tier="campaign",
+            new_resource_id=SAMPLE_CAMPAIGN_ID,
+            reason="Historical campaign created event",
+        )
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is True
+    assert transport.campaign_pause_calls == 1
+
+
+def test_36_emergency_stop_conflicting_historical_event_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """36. Historical audit event on another execution referencing this campaign blocks campaign pause."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Insert conflicting event on a foreign execution ID
+    foreign_execution_id = uuid4()
+    other_exp = ExperimentORM(
+        id=uuid4(),
+        opportunity_id=approved_experiment.opportunity_id,
+        hypothesis="Foreign hypothesis",
+        objective="Foreign objective",
+        channel="facebook",
+        monetization_method="direct_sale",
+        destination_url="https://example.com/foreign",
+        status=ExperimentStatus.APPROVED.value,
+        allocated_budget=Decimal("200.00"),
+        max_allowed_spend=Decimal("200.00"),
+        actual_spend=Decimal("0.00"),
+        success_criteria="CTR >= 1.5%",
+        failure_criteria="CTR < 0.5%",
+    )
+    session.add(other_exp)
+    session.flush()
+
+    foreign_exec = ExternalExecutionORM(
+        id=foreign_execution_id,
+        experiment_id=other_exp.id,
+        channel="meta",
+        external_account_id=SAMPLE_ACCOUNT_ID,
+        campaign_id="camp_other_999",
+        status="deployed",
+    )
+    session.add(foreign_exec)
+    session.flush()
+
+    repo = ExternalExecutionRepository(session)
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=foreign_execution_id,
+            event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+            tier="campaign",
+            new_resource_id=SAMPLE_CAMPAIGN_ID,
+            reason="Foreign execution claimed campaign",
+        )
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "conflicting historical event" in (res.rejection_reason or "").lower()
+    # Child resources still safely paused
+    assert res.ad_status is not None and res.ad_status.paused is True
+    assert res.replacement_adset_status is not None and res.replacement_adset_status.paused is True
+
+
+def test_37_emergency_stop_campaign_superseded_on_same_execution_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """37. If campaign was superseded on this execution, campaign pause is safely blocked."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    deploy_res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert deploy_res.execution is not None
+
+    repo = ExternalExecutionRepository(session)
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=deploy_res.execution.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="campaign",
+            old_resource_id=SAMPLE_CAMPAIGN_ID,
+            new_resource_id="new_camp_replaced_777",
+            reason="Campaign was superseded by replacement campaign",
+        )
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "was superseded" in (res.rejection_reason or "").lower()
+
+
+def test_38_emergency_stop_remote_campaign_id_mismatch_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """38. Remote campaign ID mismatch blocks campaign pause."""
+    transport = MockTransport(campaign_id_override="DIFFERENT_REMOTE_CAMP_ID")
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "remote campaign id 'different_remote_camp_id' does not match" in (res.rejection_reason or "").lower()
+
+
+def test_39_emergency_stop_remote_account_id_mismatch_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """39. Remote account ID mismatch blocks campaign pause."""
+    transport = MockTransport(campaign_account_id="999888777")
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "remote campaign account '999888777' does not match" in (res.rejection_reason or "").lower()
+
+
+def test_40_emergency_stop_missing_remote_account_id_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """40. Missing remote account ID blocks campaign pause."""
+    transport = MockTransport(omit_campaign_account_id=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert (
+        "remote account id 'none' is missing or malformed" in (res.rejection_reason or "").lower()
+        or "remote account id '' is missing or malformed" in (res.rejection_reason or "").lower()
+    )
+
+
+def test_41_emergency_stop_malformed_local_account_id_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """41. Malformed local account ID blocks campaign pause."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Set local account to malformed value
+    orm = session.get(ExternalExecutionORM, existing_execution.id)
+    assert orm is not None
+    orm.external_account_id = "!bad@account#"
+    session.commit()
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "local account id '!bad@account#' is missing or malformed" in (res.rejection_reason or "").lower()
+
+
+def test_42_emergency_stop_missing_campaign_name_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """42. Missing remote campaign name blocks campaign pause."""
+    transport = MockTransport(omit_campaign_name=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "remote campaign name is missing or empty" in (res.rejection_reason or "").lower()
+
+
+def test_43_emergency_stop_name_prefix_match_with_account_mismatch_blocks_campaign_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """43. Name prefix matching but remote account mismatching blocks campaign pause."""
+    transport = MockTransport(
+        campaign_name=f"VB-EXP-{approved_experiment.id}-VALID-SUFFIX",
+        campaign_account_id="777666555",
+    )
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "remote campaign account '777666555' does not match" in (res.rejection_reason or "").lower()
+
+
+def test_44_emergency_stop_invalid_ownership_never_calls_pause_campaign(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """44. pause_campaign is never called when ownership verification fails."""
+    for bad_transport in [
+        MockTransport(campaign_name="UNRELATED"),
+        MockTransport(campaign_account_id="111222333"),
+        MockTransport(campaign_id_override="DIFFERENT_ID"),
+    ]:
+        bad_adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=bad_transport)
+        res = ExecutionDispatchService.emergency_pause_adset(
+            session=session,
+            experiment_id=approved_experiment.id,
+            adapter=bad_adapter,
+            safe_mode=False,
+            explicit_auth=True,
+        )
+        assert res.is_successful is False
+        assert bad_transport.campaign_pause_calls == 0
+
+
+def test_45_emergency_stop_child_resources_continue_when_campaign_unverified(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """45. Child emergency stopping continues safely even when campaign ownership cannot be established."""
+    transport = MockTransport(campaign_account_id="999999999")
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Set remote objects to ACTIVE to prove emergency stop pauses them
+    transport.ad_status = "ACTIVE"
+    transport.adset_status = "ACTIVE"
+    transport.original_adset_status = "ACTIVE"
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert res.campaign_status is not None and res.campaign_status.paused is False
+    assert transport.campaign_pause_calls == 0
+
+    # Child resources were all safely paused and verified
+    assert res.ad_status is not None and res.ad_status.paused is True and res.ad_status.verified is True
+    assert res.replacement_adset_status is not None and res.replacement_adset_status.paused is True and res.replacement_adset_status.verified is True
+    assert res.original_adset_status is not None and res.original_adset_status.paused is True and res.original_adset_status.verified is True
+
+
+def test_46_meta_adapter_get_campaign_requests_account_id(
+    session: Session,
+):
+    """46. MetaMarketingApiAdapter.get_campaign requests account_id in query fields."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    adapter.get_campaign(SAMPLE_CAMPAIGN_ID)
+    assert len(transport.requests) == 1
+    req = transport.requests[0]
+    assert "fields=" in req.full_url
+    assert "account_id" in req.full_url
+    assert "id" in req.full_url
+    assert "name" in req.full_url
+    assert "status" in req.full_url
+    assert "effective_status" in req.full_url
+
+
+# ==============================================================================
+# Step 90.12.8 Hardened Tests: Account ID, Token Preflight, Emergency Stop, Versioning
+# ==============================================================================
+
+
+def test_47_validate_meta_account_id_valid_formats():
+    """47. validate_meta_account_id accepts plain numeric and act_-prefixed string formats."""
+    # Plain numeric
+    assert validate_meta_account_id("1985595022114520") == "1985595022114520"
+    # With single act_ prefix
+    assert validate_meta_account_id("act_1985595022114520") == "1985595022114520"
+    # Leading and trailing whitespace trimmed
+    assert validate_meta_account_id("  1985595022114520 \t\n") == "1985595022114520"
+    assert validate_meta_account_id("  act_1985595022114520  ") == "1985595022114520"
+
+
+def test_48_validate_meta_account_id_rejects_non_string_types():
+    """48. validate_meta_account_id strictly rejects non-string types without str() coercion."""
+    assert validate_meta_account_id(1985595022114520) is None
+    assert validate_meta_account_id(1985595022114520.0) is None
+    assert validate_meta_account_id(True) is None
+    assert validate_meta_account_id(False) is None
+    assert validate_meta_account_id(["1985595022114520"]) is None
+    assert validate_meta_account_id({"account_id": "1985595022114520"}) is None
+    assert validate_meta_account_id(None) is None
+
+
+def test_49_validate_meta_account_id_rejects_malformed_strings():
+    """49. validate_meta_account_id rejects empty, alphabetic, unicode, punctuation, and repeated prefixes."""
+    # Empty and whitespace
+    assert validate_meta_account_id("") is None
+    assert validate_meta_account_id("   ") is None
+    assert validate_meta_account_id("\t\n") is None
+    # Prefix only
+    assert validate_meta_account_id("act_") is None
+    # Repeated prefixes
+    assert validate_meta_account_id("act_act_1985595022114520") is None
+    assert validate_meta_account_id("act_act_123") is None
+    # Letters / alphanumeric
+    assert validate_meta_account_id("act_19855abc") is None
+    assert validate_meta_account_id("abcdef") is None
+    # Embedded whitespace
+    assert validate_meta_account_id("act_ 1985595022114520") is None
+    assert validate_meta_account_id("19855 95022114520") is None
+    # Punctuation
+    assert validate_meta_account_id("19855-95022114520") is None
+    assert validate_meta_account_id("19855.95022114520") is None
+    # Non-ASCII digits (Arabic-Indic, Full-width)
+    assert validate_meta_account_id("\u0661\u0662\u0663\u0664\u0665") is None
+    assert validate_meta_account_id("\uff11\uff12\uff13") is None
+
+
+def test_50_campaign_ownership_equivalent_ids_with_different_prefixes_succeed(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """50. Ownership check succeeds when remote has plain numeric and local has act_ prefix."""
+    # Remote has plain numeric ID (no act_ prefix)
+    transport = MockTransport(campaign_account_id="1985595022114520")
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is True
+    assert res.campaign_status is not None and res.campaign_status.paused is True
+    assert transport.campaign_pause_calls == 1
+
+
+def test_51_campaign_ownership_rejects_integer_local_account_id(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """51. If local external_account_id is not a string, campaign pause is blocked."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Use monkeypatch on ExternalExecutionRepository.get_by_experiment_id to return execution with integer account ID
+    orig_get = ExternalExecutionRepository.get_by_experiment_id
+
+    def fake_get(self_repo: ExternalExecutionRepository, exp_id: UUID) -> ExternalExecution | None:
+        rec = orig_get(self_repo, exp_id)
+        if rec is not None:
+            object.__setattr__(rec, "external_account_id", 1985595022114520)
+        return rec
+
+    monkeypatch.setattr(ExternalExecutionRepository, "get_by_experiment_id", fake_get)
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "local account id '1985595022114520' is missing or malformed" in (res.rejection_reason or "").lower()
+
+
+def test_52_campaign_ownership_rejects_unicode_numerals(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """52. Remote account ID with Unicode numerals blocks campaign pause."""
+    transport = MockTransport(campaign_account_id="\u0661\u0662\u0663\u0664\u0665\u0666")
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "missing or malformed" in (res.rejection_reason or "").lower()
+
+
+def test_53_campaign_ownership_rejects_repeated_act_prefix(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """53. Remote account ID with repeated 'act_' prefixes blocks campaign pause."""
+    transport = MockTransport(campaign_account_id="act_act_1985595022114520")
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    res = ExecutionDispatchService.emergency_pause_adset(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.is_successful is False
+    assert transport.campaign_pause_calls == 0
+    assert "missing or malformed" in (res.rejection_reason or "").lower()
+
+
+def test_54_inspect_token_permanent_system_user_token_valid():
+    """54. System user permanent token with expires_at == 0 passes inspection as VALID."""
+    transport = MockTransport(token_never_expires=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+    assert result.status == TokenStatus.VALID
+    assert result.is_valid is True
+    assert result.expires_at is None
+    assert result.remaining_seconds is None
+
+
+def test_55_inspect_token_valid_long_lived_token():
+    """55. Token valid for 90 days (> 72 hours) passes inspection as VALID."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+    assert result.status == TokenStatus.VALID
+    assert result.is_valid is True
+    assert result.remaining_seconds is not None
+    assert result.remaining_seconds > 72.0 * 3600
+
+
+def test_56_inspect_token_expired_token():
+    """56. Token with expiration in the past returns EXPIRED status."""
+    transport = MockTransport(token_expired=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+    assert result.status == TokenStatus.EXPIRED
+    assert result.is_valid is False
+    assert "Token expired at" in (result.rejection_reason or "")
+
+
+def test_57_inspect_token_near_expiry_fails_preflight():
+    """57. Token expiring in 20 hours (< 72 hours required) returns NEAR_EXPIRY."""
+    transport = MockTransport(token_near_expiry=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+    assert result.status == TokenStatus.NEAR_EXPIRY
+    assert result.is_valid is False
+    assert "insufficient" in (result.rejection_reason or "").lower()
+    assert "72.0h" in (result.rejection_reason or "")
+
+
+def test_58_inspect_token_meta_rejected_invalid_token():
+    """58. Meta reporting is_valid == False returns INVALID status."""
+    transport = MockTransport(token_is_invalid=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "Invalid OAuth access token" in (result.rejection_reason or "")
+
+
+def test_59_inspect_token_missing_token_string():
+    """59. Adapter with empty token string immediately returns INVALID."""
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token="", transport=MockTransport())
+
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "missing or empty" in (result.rejection_reason or "")
+
+
+def test_60_inspect_token_network_api_error_fails_closed():
+    """60. Network failure during token inspection fails closed with INSPECTION_UNAVAILABLE."""
+    transport = MockTransport(fail_token_inspection=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INSPECTION_UNAVAILABLE
+    assert result.is_valid is False
+    assert "Token inspection request failed" in (result.rejection_reason or "")
+
+
+def test_61_inspect_token_malformed_response_fails_closed():
+    """61. Malformed JSON response without 'data' envelope fails closed with INSPECTION_UNAVAILABLE."""
+    transport = MockTransport(malformed_token_response=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INSPECTION_UNAVAILABLE
+    assert result.is_valid is False
+    assert "Malformed debug_token response" in (result.rejection_reason or "")
+
+
+def test_62_deploy_recovery_dormant_blocks_when_token_expired(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """62. deploy_recovery_dormant blocks immediately when access token is expired."""
+    transport = MockTransport(token_expired=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "TOKEN_PREFLIGHT_FAILED: EXPIRED" in res.reason
+
+
+def test_63_deploy_recovery_dormant_blocks_when_token_near_expiry(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """63. deploy_recovery_dormant blocks when token expires within 72h (< 48h flight + 24h buffer)."""
+    transport = MockTransport(token_near_expiry=True)
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "TOKEN_PREFLIGHT_FAILED: NEAR_EXPIRY" in res.reason
+
+
+def test_64_activate_recovery_flight_blocks_when_token_expired(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """64. activate_recovery_flight blocks immediately when access token is expired."""
+    # First deploy dormant with valid token
+    transport_valid = MockTransport()
+    adapter_valid = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport_valid)
+    deploy_res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter_valid,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert deploy_res.success is True
+
+    # Now attempt activation with expired token
+    transport_expired = MockTransport(token_expired=True)
+    adapter_expired = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport_expired)
+    act_res = ExecutionDispatchService.activate_recovery_flight(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter_expired,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert act_res.success is False
+    assert act_res.blocked is True
+    assert "TOKEN_PREFLIGHT_FAILED: EXPIRED" in act_res.reason
+
+
+def test_65_activate_recovery_flight_blocks_when_token_near_expiry(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """65. activate_recovery_flight blocks when access token is near expiry (< 72h)."""
+    # First deploy dormant with valid token
+    transport_valid = MockTransport()
+    adapter_valid = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport_valid)
+    deploy_res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter_valid,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert deploy_res.success is True
+
+    # Attempt activation with near-expiry token
+    transport_near = MockTransport(token_near_expiry=True)
+    adapter_near = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport_near)
+    act_res = ExecutionDispatchService.activate_recovery_flight(
+        session=session,
+        experiment_id=approved_experiment.id,
+        adapter=adapter_near,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert act_res.success is False
+    assert act_res.blocked is True
+    assert "TOKEN_PREFLIGHT_FAILED: NEAR_EXPIRY" in act_res.reason
+
+
+def test_66_token_inspection_sanitizes_input_token_in_errors():
+    """66. Error message containing input_token parameter redacts the secret value."""
+    from venturebot.execution.dispatch import _sanitize_error
+
+    err_str = "Error calling https://graph.facebook.com/v20.0/debug_token?input_token=EAAXsecret123&access_token=EAAXsecret456 with Bearer EAAXsecret789"
+    cleaned = _sanitize_error(err_str)
+    assert "EAAXsecret123" not in cleaned
+    assert "EAAXsecret456" not in cleaned
+    assert "EAAXsecret789" not in cleaned
+    assert "input_token=[REDACTED]" in cleaned
+    assert "access_token=[REDACTED]" in cleaned
+    assert "Bearer [REDACTED]" in cleaned
+
+
+def test_67_emergency_stop_routes_option_b_to_four_tier_pause(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """67. ExecutionDispatchService.emergency_stop routes Option B execution through 4-tier emergency_pause_adset."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # Deploy Option B recovery (creates superseded lineage event)
+    deploy_res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert deploy_res.success is True
+
+    # Set mock remote objects to ACTIVE
+    transport.ad_status = "ACTIVE"
+    transport.adset_status = "ACTIVE"
+    transport.original_adset_status = "ACTIVE"
+
+    stop_res = ExecutionDispatchService.emergency_stop(
+        session=session,
+        experiment_id=approved_experiment.id,
+        reason="Human operator triggered emergency stop.",
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert stop_res.is_successful is True
+    # Proves all 4 tiers were inspected/paused
+    assert stop_res.campaign_status is not None and stop_res.campaign_status.paused is True and stop_res.campaign_status.verified is True
+    assert stop_res.ad_status is not None and stop_res.ad_status.paused is True and stop_res.ad_status.verified is True
+    assert stop_res.replacement_adset_status is not None and stop_res.replacement_adset_status.paused is True and stop_res.replacement_adset_status.verified is True
+    assert stop_res.original_adset_status is not None and stop_res.original_adset_status.paused is True and stop_res.original_adset_status.verified is True
+    # Experiment marked KILLED
+    assert stop_res.experiment is not None
+    assert stop_res.experiment.status == ExperimentStatus.KILLED
+
+
+def test_68_legacy_emergency_stop_prohibited_for_option_b(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """68. MetaExperimentDispatchService._emergency_stop rejects Option B recovery executions."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # Deploy Option B recovery
+    ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+
+    # Directly invoking legacy _emergency_stop on Option B must fail closed
+    legacy_res = MetaExperimentDispatchService._emergency_stop(
+        session=session,
+        experiment_id=approved_experiment.id,
+        reason="Operator abort attempt",
+        adapter=adapter,
+    )
+    assert legacy_res.is_successful is False
+    assert "LEGACY_EMERGENCY_STOP_PROHIBITED_FOR_OPTION_B" in (legacy_res.rejection_reason or "")
+    # Campaign was NOT paused via legacy method
+    assert transport.campaign_pause_calls == 0
+
+
+def test_69_emergency_stop_routes_non_option_b_to_legacy_stop(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+):
+    """69. ExecutionDispatchService.emergency_stop routes standard non-Option B experiments to legacy stop."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # Execution exists without any superseded ad set events (non-Option B)
+    exec_repo = ExternalExecutionRepository(session)
+    events = exec_repo.get_events(existing_execution.id)
+    assert len(events) == 0
+
+    stop_res = ExecutionDispatchService.emergency_stop(
+        session=session,
+        experiment_id=approved_experiment.id,
+        reason="Operator triggered standard abort.",
+        adapter=adapter,
+    )
+    assert stop_res.is_successful is True
+    assert stop_res.experiment is not None
+    assert stop_res.experiment.status == ExperimentStatus.KILLED
+    assert transport.campaign_pause_calls == 1
+
+
+def test_70_duplicate_recovery_ordinary_retry_adopts_existing_replacement(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """70. Retrying deploy_recovery_dormant with version=2 adopts existing replacement ad set."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # First deployment creates replacement
+    r1 = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=2,
+    )
+    assert r1.success is True
+
+    # On retry with version 2:
+    r2 = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=2,
+    )
+    assert r2.success is True
+
+    # Lineage check: superseded events must not be duplicated
+    exec_repo = ExternalExecutionRepository(session)
+    events = exec_repo.get_events(existing_execution.id)
+    superseded = [e for e in events if e.event_type == ExternalExecutionEventType.RESOURCE_SUPERSEDED.value]
+    assert len(superseded) == 1
+    assert superseded[0].old_resource_id == ORIGINAL_ADSET_ID
+
+
+def test_71_duplicate_recovery_unauthorized_version_change_blocked(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """71. Attempting version=3 without spec.authorized_recovery_version=3 is blocked."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # Attempting to jump to version 3 without authorization
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=3,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "UNAUTHORIZED_RECOVERY_VERSION" in res.reason
+
+
+def test_72_duplicate_recovery_untrusted_operator_identity_blocked(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """72. Version 3 is blocked because VentureBot lacks trusted operator authentication (Rules A.7/A.8)."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # Durably record operator authorization event for recovery version 3
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_step90_12_9",
+        reason="Explicit human approval for recovery version 3 retry",
+    )
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=3,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "UNTRUSTED_OPERATOR_AUTHENTICATION" in res.reason
+
+
+def test_73_duplicate_recovery_invalid_version_below_two_blocked(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """73. Recovery version below 2 is rejected as INVALID_RECOVERY_VERSION."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=1,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "INVALID_RECOVERY_VERSION" in res.reason
+
+
+# ── Section A: Inspector Authentication Verification (Tests 74–80) ────────────
+
+def test_74_inspect_token_with_app_access_token_succeeds():
+    """74. Token inspection with valid App Access Token succeeds and identifies APP_ACCESS_TOKEN."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        inspector_access_token="APP_ID|APP_SECRET",
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.VALID
+    assert result.is_valid is True
+    assert result.inspector_type == "APP_ACCESS_TOKEN"
+
+
+def test_75_inspect_token_missing_inspector_fails_closed(monkeypatch: pytest.MonkeyPatch):
+    """75. Missing inspector credential fails closed with UNVERIFIED_INSPECTOR_AUTHENTICATION."""
+    monkeypatch.delenv("META_APP_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("META_INSPECTOR_ACCESS_TOKEN", raising=False)
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        inspector_access_token=None,
+        allow_self_inspection=False,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INSPECTION_UNAVAILABLE
+    assert result.is_valid is False
+    assert "UNVERIFIED_INSPECTOR_AUTHENTICATION" in (result.rejection_reason or "")
+
+
+def test_76_inspect_token_self_inspection_allowed(monkeypatch: pytest.MonkeyPatch):
+    """76. Explicitly allowing self-inspection identifies inspector_type as SELF_INSPECTION."""
+    monkeypatch.delenv("META_APP_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("META_INSPECTOR_ACCESS_TOKEN", raising=False)
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        inspector_access_token=None,
+        allow_self_inspection=True,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.VALID
+    assert result.is_valid is True
+    assert result.inspector_type == "SELF_INSPECTION"
+
+
+def test_77_inspect_token_inspector_auth_rejected_by_meta():
+    """77. Meta API error rejecting inspector credential (OAuthException 190) fails closed with INVALID."""
+    transport = MockTransport(fail_inspector_auth=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "Meta rejected token" in (result.rejection_reason or "")
+
+
+def test_78_inspect_token_inspector_wrong_app_rejected_by_meta():
+    """78. Meta API rejecting inspector token permissions (OAuthException 10) fails closed."""
+    transport = MockTransport(inspector_wrong_app=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "Meta rejected token" in (result.rejection_reason or "")
+
+
+def test_79_inspect_token_network_failure_fails_closed():
+    """79. Network failure during token inspection fails closed with INSPECTION_UNAVAILABLE."""
+    transport = MockTransport(fail_token_inspection=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INSPECTION_UNAVAILABLE
+    assert result.is_valid is False
+    assert "Token inspection request failed" in (result.rejection_reason or "")
+
+
+def test_80_inspect_token_malformed_response_fails_closed():
+    """80. Malformed debug_token response missing 'data' envelope fails closed with INSPECTION_UNAVAILABLE."""
+    transport = MockTransport(malformed_token_response=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INSPECTION_UNAVAILABLE
+    assert result.is_valid is False
+    assert "Malformed debug_token response" in (result.rejection_reason or "")
+
+
+# ── Section B: Token Metadata Validation (Tests 81–88) ────────────────────────
+
+def test_81_inspect_token_app_id_mismatch_rejected():
+    """81. debug_token reporting app_id not matching expected app ID is rejected as INVALID."""
+    transport = MockTransport(token_mismatched_app_id=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        expected_app_id="1063651013045060",
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "does not match expected" in (result.rejection_reason or "")
+
+
+def test_82_inspect_token_incompatible_type_rejected():
+    """82. debug_token reporting incompatible token type (e.g. PAGE) is rejected as INVALID."""
+    transport = MockTransport(incompatible_token_type=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "Incompatible token type 'PAGE'" in (result.rejection_reason or "")
+
+
+def test_83_inspect_token_missing_required_scopes_rejected():
+    """83. debug_token missing required scopes ('ads_management', 'ads_read') is rejected as INVALID."""
+    transport = MockTransport(missing_required_scopes=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "missing required permission scopes" in (result.rejection_reason or "")
+
+
+def test_84_inspect_token_granular_scopes_unauthorized_ad_account_rejected():
+    """84. Granular scopes restricting targets without the target ad account is rejected as INVALID."""
+    transport = MockTransport(granular_scopes_unauthorized=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token(target_ad_account_id=SAMPLE_ACCOUNT_ID)
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "not authorized in granular_scopes" in (result.rejection_reason or "")
+
+
+def test_85_inspect_token_granular_scopes_authorized_ad_account_succeeds():
+    """85. Granular scopes explicitly containing the target ad account succeeds as VALID."""
+    transport = MockTransport(granular_scopes_authorized=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token(target_ad_account_id=SAMPLE_ACCOUNT_ID)
+    assert result.status == TokenStatus.VALID
+    assert result.is_valid is True
+    assert len(result.granular_scopes) > 0
+
+
+def test_86_inspect_token_data_access_expired_rejected():
+    """86. Token with data_access_expires_at in the past returns EXPIRED status."""
+    transport = MockTransport(data_access_expired=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.EXPIRED
+    assert result.is_valid is False
+    assert "Data access expired" in (result.rejection_reason or "")
+
+
+def test_87_inspect_token_data_access_near_expiry_rejected():
+    """87. Token with data_access_expires_at within 72 hours returns NEAR_EXPIRY."""
+    transport = MockTransport(data_access_near_expiry=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+    assert result.status == TokenStatus.NEAR_EXPIRY
+    assert result.is_valid is False
+    assert "Data access remaining validity" in (result.rejection_reason or "")
+    assert "Requires at least 72.0h" in (result.rejection_reason or "")
+
+
+def test_88_inspect_token_permanent_token_requires_valid_metadata():
+    """88. Permanent token (expires_at == 0) with mismatched app_id is rejected despite zero expiry."""
+    transport = MockTransport(token_never_expires=True, token_mismatched_app_id=True)
+    adapter = MetaMarketingApiAdapter(
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        access_token=SAMPLE_TOKEN,
+        transport=transport,
+    )
+    result = adapter.inspect_token()
+    assert result.status == TokenStatus.INVALID
+    assert result.is_valid is False
+    assert "does not match expected" in (result.rejection_reason or "")
+
+
+# ── Section C: Recovery-Version Authorization (Tests 89–92) ───────────────────
+
+def test_89_record_recovery_version_authorization_persists_event(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+):
+    """89. record_recovery_version_authorization creates immutable event with operator, version, and reason."""
+    ev = ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_test_89",
+        reason="Manual approval for version 3 test execution",
+    )
+    assert ev is not None
+    assert ev.event_type == ExternalExecutionEventType.RECOVERY_VERSION_AUTHORIZED.value
+    assert ev.execution_id == existing_execution.id
+
+    # Verify event retrieval from repository
+    repo = ExternalExecutionRepository(session)
+    events = repo.get_events(existing_execution.id)
+    auth_events = [e for e in events if e.event_type == ExternalExecutionEventType.RECOVERY_VERSION_AUTHORIZED.value]
+    assert len(auth_events) == 1
+    assert "operator_test_89" in (auth_events[0].reason or "")
+    assert "version 3" in (auth_events[0].reason or "")
+
+
+def test_90_deploy_recovery_dormant_v3_without_persisted_event_blocked(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """90. Caller setting spec.authorized_recovery_version=3 without persisted event is rejected."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    # In-memory shortcut alone must NOT suffice
+    valid_spec.authorized_recovery_version = 3
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=3,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "UNAUTHORIZED_RECOVERY_VERSION" in res.reason
+
+
+def test_91_deploy_recovery_dormant_v3_fails_closed_on_untrusted_operator(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """91. Persisting authorization event with caller-supplied identity fails closed (Rules A.7/A.8)."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="security_officer_42",
+        reason="Authorization grant for version 3 dormant deployment",
+    )
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=3,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "UNTRUSTED_OPERATOR_AUTHENTICATION" in res.reason
+
+
+def test_92_record_recovery_version_authorization_input_validation(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+):
+    """92. record_recovery_version_authorization rejects invalid inputs (version < 3, empty operator, empty reason)."""
+    # Invalid version < 3
+    with pytest.raises(ValueError, match="authorized_version must be >= 3"):
+        ExecutionDispatchService.record_recovery_version_authorization(
+            session=session,
+            execution_id=existing_execution.id,
+            authorized_version=2,
+            operator_id="operator_1",
+            reason="valid reason",
+        )
+
+    # Empty operator
+    with pytest.raises(ValueError, match="operator_id must be a non-empty string"):
+        ExecutionDispatchService.record_recovery_version_authorization(
+            session=session,
+            execution_id=existing_execution.id,
+            authorized_version=3,
+            operator_id="   ",
+            reason="valid reason",
+        )
+
+    # Empty reason
+    with pytest.raises(ValueError, match="reason must be a non-empty string"):
+        ExecutionDispatchService.record_recovery_version_authorization(
+            session=session,
+            execution_id=existing_execution.id,
+            authorized_version=3,
+            operator_id="operator_1",
+            reason="",
+        )
+
+
+# ── Section D: Option B Emergency-Stop Classification (Tests 93–100) ──────────
+
+def test_93_classify_execution_lineage_standard(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """93. Execution with standard status and no superseded events is classified as STANDARD."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.PENDING,
+        )
+    )
+    events = repo.get_events(exec_rec.id)
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.STANDARD
+    assert orig_id is None
+    assert anomaly is None
+
+
+def test_94_classify_execution_lineage_option_b(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    valid_spec: MetaExecutionSpecification,
+    existing_execution: ExternalExecution,
+):
+    """94. Option B recovery execution with valid superseded event is classified as OPTION_B."""
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    deploy_res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=2,
+    )
+    assert deploy_res.success is True
+
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.get_by_id(existing_execution.id)
+    assert exec_rec is not None
+    events = repo.get_events(exec_rec.id)
+
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.OPTION_B
+    assert orig_id == ORIGINAL_ADSET_ID
+    assert anomaly is None
+
+
+def test_95_classify_execution_lineage_dormant_recovery_missing_event_ambiguous(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """95. DORMANT_RECOVERY execution missing RESOURCE_SUPERSEDED event classifies as AMBIGUOUS_RECOVERY."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+    events = repo.get_events(exec_rec.id)
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY
+    assert orig_id is None
+    assert "RESOURCE_SUPERSEDED lineage event is missing" in (anomaly or "")
+
+
+def test_96_classify_execution_lineage_malformed_old_id_ambiguous(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """96. Superseded event with empty or malformed old_resource_id classifies as AMBIGUOUS_RECOVERY."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=exec_rec.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="",
+            new_resource_id="120252176254130399",
+            reason="Superseded",
+        )
+    )
+    events = repo.get_events(exec_rec.id)
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY
+    assert "old_resource_id is missing or empty" in (anomaly or "")
+
+
+def test_97_classify_execution_lineage_conflicting_old_ids_ambiguous(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """97. Multiple superseded events with conflicting old_resource_id classifies as AMBIGUOUS_RECOVERY."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=exec_rec.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="120252176254130380",
+            new_resource_id="120252176254130399",
+            reason="First superseding",
+        )
+    )
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=exec_rec.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="999999999999999999",
+            new_resource_id="120252176254130399",
+            reason="Conflicting superseding",
+        )
+    )
+    events = repo.get_events(exec_rec.id)
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY
+    assert "distinct old_resource_ids" in (anomaly or "")
+
+
+def test_98_classify_execution_lineage_replacement_matches_original_ambiguous(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """98. Replacement ad set ID identical to original ad set ID classifies as AMBIGUOUS_RECOVERY."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=exec_rec.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="120252176254130380",
+            new_resource_id="120252176254130380",  # Same ID!
+            reason="Cyclic superseding",
+        )
+    )
+    events = repo.get_events(exec_rec.id)
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY
+    assert "matches superseded original adset_id" in (anomaly or "")
+
+
+def test_99_emergency_stop_ambiguous_lineage_fails_closed_never_routes_legacy(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """99. ExecutionDispatchService.emergency_stop fails closed on AMBIGUOUS_RECOVERY and makes zero mutation calls."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+    # No superseded events added -> triggers AMBIGUOUS_RECOVERY
+
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    stop_res = ExecutionDispatchService.emergency_stop(
+        session=session,
+        experiment_id=approved_experiment.id,
+        reason="Test abort on corrupted execution lineage",
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+    )
+    assert stop_res.is_successful is False
+    assert "AMBIGUOUS_RECOVERY_LINEAGE" in (stop_res.rejection_reason or "")
+    # Proves campaign was NEVER touched via legacy path
+    assert transport.campaign_pause_calls == 0
+
+
+def test_100_legacy_emergency_stop_rejects_ambiguous_recovery_lineage(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """100. MetaExperimentDispatchService._emergency_stop fails closed when invoked on AMBIGUOUS_RECOVERY lineage."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    legacy_res = MetaExperimentDispatchService._emergency_stop(
+        session=session,
+        experiment_id=approved_experiment.id,
+        reason="Attempting direct legacy emergency stop on ambiguous recovery lineage",
+        adapter=adapter,
+    )
+    assert legacy_res.is_successful is False
+    assert "AMBIGUOUS_RECOVERY_LINEAGE_PROHIBITED" in (legacy_res.rejection_reason or "")
+    assert transport.campaign_pause_calls == 0
+
+
+def test_101_approval_for_execution_a_cannot_authorize_execution_b(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """101. Approval for execution A cannot authorize execution B."""
+    repo = ExternalExecutionRepository(session)
+    # Create second execution B under a different experiment
+    exp_b = ExperimentORM(
+        id=uuid4(),
+        opportunity_id=approved_experiment.opportunity_id,
+        hypothesis="Exp B",
+        objective="Validate demand B",
+        channel="facebook",
+        monetization_method="direct_sale",
+        destination_url="https://example.com/b",
+        status=ExperimentStatus.APPROVED.value,
+        allocated_budget=Decimal("200.00"),
+        max_allowed_spend=Decimal("200.00"),
+        actual_spend=Decimal("0.00"),
+        success_criteria="CTR >= 1.5%",
+        failure_criteria="CTR < 0.5%",
+    )
+    session.add(exp_b)
+    session.flush()
+
+    exec_b = repo.create(
+        ExternalExecution(
+            experiment_id=exp_b.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id="120252176243860399",
+            adset_id="120252176254130399",
+            status=ExternalExecutionStatus.FAILED,
+        )
+    )
+
+    # Record authorization strictly for execution A
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_valid",
+        reason="Approval for execution A",
+    )
+
+    # Attempt deployment for execution B with version 3
+    spec_b = MetaExecutionSpecification(
+        experiment_id=exp_b.id,
+        ad_account_id=SAMPLE_ACCOUNT_ID,
+        page_id="1389949167526709",
+        destination_url="https://example.com/b",
+        primary_text="Text",
+        headline="Headline",
+        image_hash=SAMPLE_IMAGE_HASH,
+        call_to_action="LEARN_MORE",
+        campaign_objective="OUTCOME_TRAFFIC",
+        countries=["IN"],
+        age_min=22,
+        age_max=55,
+        authorized_budget=Decimal("200.00"),
+        start_time=valid_spec.start_time,
+        end_time=valid_spec.end_time,
+        special_ad_categories=["NONE"],
+        status="PAUSED",
+        explicit_dispatch_authorized=True,
+    )
+
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=exp_b.id,
+        spec=spec_b,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=3,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "UNAUTHORIZED_RECOVERY_VERSION" in res.reason
+
+
+def test_102_approval_for_experiment_a_cannot_authorize_experiment_b(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """102. Approval for experiment A cannot authorize experiment B."""
+    wrong_exp_id = uuid4()
+    with pytest.raises(ValueError, match="does not match experiment"):
+        ExecutionDispatchService.record_recovery_version_authorization(
+            session=session,
+            execution_id=existing_execution.id,
+            experiment_id=wrong_exp_id,
+            authorized_version=3,
+            operator_id="operator_sec",
+            reason="Mismatched IDs",
+        )
+
+
+def test_103_approval_for_version_3_cannot_authorize_version_4(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """103. Approval for version 3 cannot authorize version 4."""
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_test",
+        reason="Authorize version 3 strictly",
+    )
+
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=4,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "Approval for version 3 cannot authorize version 4" in res.reason
+
+
+def test_104_duplicate_authorization_event_rejected(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+):
+    """104. Duplicate authorization attempt for the same version and execution raises ValueError."""
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_first",
+        reason="First authorization",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate authorization rejected"):
+        ExecutionDispatchService.record_recovery_version_authorization(
+            session=session,
+            execution_id=existing_execution.id,
+            authorized_version=3,
+            operator_id="operator_second",
+            reason="Second duplicate authorization",
+        )
+
+
+def test_105_conflicting_authorization_event_rejected(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+):
+    """105. Conflicting authorization attempt for a different version on the same execution raises ValueError."""
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_v3",
+        reason="Authorize version 3",
+    )
+
+    with pytest.raises(ValueError, match="Conflicting authorization rejected"):
+        ExecutionDispatchService.record_recovery_version_authorization(
+            session=session,
+            execution_id=existing_execution.id,
+            authorized_version=4,
+            operator_id="operator_v4",
+            reason="Attempt conflicting version 4",
+        )
+
+
+def test_106_replay_prevention_rejects_repeated_deployment_after_partial_creation(
+    session: Session,
+    approved_experiment: ExperimentORM,
+    existing_execution: ExternalExecution,
+    valid_spec: MetaExecutionSpecification,
+):
+    """106. Replay prevention: Authorization cannot silently authorize repeated resource creation."""
+    repo = ExternalExecutionRepository(session)
+    # Record authorization for version 3
+    ExecutionDispatchService.record_recovery_version_authorization(
+        session=session,
+        execution_id=existing_execution.id,
+        authorized_version=3,
+        operator_id="operator_replay_test",
+        reason="Replay test authorization",
+    )
+
+    # Simulate that replacement resource for version 3 was already created
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=existing_execution.id,
+            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+            tier="adset",
+            old_resource_id=None,
+            new_resource_id="120252176299999999-ADSET-v3",
+            reason="Simulated prior creation of replacement adset",
+        )
+    )
+
+    transport = MockTransport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
+
+    res = ExecutionDispatchService.deploy_recovery_dormant(
+        session=session,
+        experiment_id=approved_experiment.id,
+        spec=valid_spec,
+        adapter=adapter,
+        safe_mode=False,
+        explicit_auth=True,
+        version=3,
+    )
+    assert res.success is False
+    assert res.blocked is True
+    assert "RECOVERY_AUTHORIZATION_REPLAY_REJECTED" in res.reason
+
+
+def test_107_duplicate_superseded_events_classified_as_ambiguous(
+    session: Session,
+    approved_experiment: ExperimentORM,
+):
+    """107. Duplicate superseded events with same resource ID classifies as AMBIGUOUS_RECOVERY."""
+    repo = ExternalExecutionRepository(session)
+    exec_rec = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id=SAMPLE_CAMPAIGN_ID,
+            adset_id="120252176254130380",
+            status=ExternalExecutionStatus.DORMANT_RECOVERY,
+        )
+    )
+    # Add two identical superseded events (duplicate mutation records)
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=exec_rec.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="120252176254130380",
+            new_resource_id="120252176254130399",
+            reason="First superseding event",
+        )
+    )
+    repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=exec_rec.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="120252176254130380",
+            new_resource_id="120252176254130399",
+            reason="Duplicate superseding event",
+        )
+    )
+
+    events = repo.get_events(exec_rec.id)
+    classification, orig_id, anomaly = classify_execution_lineage(exec_rec, events)
+    assert classification == RecoveryLineageClassification.AMBIGUOUS_RECOVERY
+    assert "Duplicate or conflicting superseded events detected" in (anomaly or "")

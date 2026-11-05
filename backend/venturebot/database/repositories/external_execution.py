@@ -29,11 +29,24 @@ class ExternalExecutionRepository:
         orm = self.session.get(ExternalExecutionORM, execution_id)
         return self._to_pydantic(orm) if orm is not None else None
 
+    def get_by_id(self, execution_id: UUID) -> ExternalExecution | None:
+        """Retrieve external execution record by ID (alias for get)."""
+        return self.get(execution_id)
+
     def get_by_experiment_id(self, experiment_id: UUID) -> ExternalExecution | None:
         """Retrieve the current external execution record for an experiment."""
         stmt = select(ExternalExecutionORM).where(ExternalExecutionORM.experiment_id == experiment_id)
         orm = self.session.scalars(stmt).first()
         return self._to_pydantic(orm) if orm is not None else None
+
+    def get_by_campaign_id(self, campaign_id: str) -> list[ExternalExecution]:
+        """Retrieve all external execution records referencing the exact campaign ID."""
+        clean_id = campaign_id.strip() if campaign_id else ""
+        if not clean_id:
+            return []
+        stmt = select(ExternalExecutionORM).where(ExternalExecutionORM.campaign_id == clean_id)
+        orms = self.session.scalars(stmt).all()
+        return [self._to_pydantic(o) for o in orms]
 
     def create(self, execution: ExternalExecution) -> ExternalExecution:
         """Persist a new ExternalExecution record."""
@@ -149,6 +162,23 @@ class ExternalExecutionRepository:
         )
         if tier is not None:
             stmt = stmt.where(ExternalExecutionEventORM.tier == tier)
+        orms = self.session.scalars(stmt).all()
+        return [self._event_to_pydantic(o) for o in orms]
+
+    def get_events_by_resource_id(
+        self, resource_id: str, tier: str | None = None
+    ) -> list[ExternalExecutionEvent]:
+        """Retrieve all historical audit events mentioning a resource ID as old or new."""
+        clean_id = resource_id.strip() if resource_id else ""
+        if not clean_id:
+            return []
+        stmt = select(ExternalExecutionEventORM).where(
+            (ExternalExecutionEventORM.new_resource_id == clean_id)
+            | (ExternalExecutionEventORM.old_resource_id == clean_id)
+        )
+        if tier is not None:
+            stmt = stmt.where(ExternalExecutionEventORM.tier == tier)
+        stmt = stmt.order_by(ExternalExecutionEventORM.created_at.asc())
         orms = self.session.scalars(stmt).all()
         return [self._event_to_pydantic(o) for o in orms]
 

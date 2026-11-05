@@ -35,12 +35,23 @@ from venturebot.execution.meta import (
     MetaMarketingApiAdapter,
 )
 from venturebot.models.experiment import Channel, Experiment, ExperimentStatus, MonetizationMethod
-from venturebot.models.external_execution import ExternalExecution, ExternalExecutionStatus
+from venturebot.models.external_execution import (
+    ExternalExecution,
+    ExternalExecutionEvent,
+    ExternalExecutionEventType,
+    ExternalExecutionStatus,
+)
 from venturebot.models.opportunity import Opportunity, OpportunityCategory, OpportunityStatus
 
 SAMPLE_ACCOUNT_ID = "act_1985595022114520"
 SAMPLE_TOKEN = "EAABwzL12345fakeToken"
 SAMPLE_PAGE_ID = "10987654321"
+
+
+@pytest.fixture(autouse=True)
+def _enable_dispatch_mock_testing(monkeypatch: pytest.MonkeyPatch):
+    """Explicitly configure safe mode disabled for mocked dispatch service tests."""
+    monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
 
 
 @pytest.fixture
@@ -324,6 +335,80 @@ def test_orm_update_last_error(session: Session, approved_experiment: Experiment
     )
     assert updated.status == ExternalExecutionStatus.FAILED
     assert updated.last_error == "Ad rejected due to creative policy."
+
+
+def test_repo_get_by_campaign_id(session: Session, approved_experiment: Experiment):
+    """Verify ExternalExecutionRepository.get_by_campaign_id handles exact equality queries."""
+    repo = ExternalExecutionRepository(session)
+    # Empty query returns empty list
+    assert repo.get_by_campaign_id("") == []
+    assert repo.get_by_campaign_id("non_existent_campaign") == []
+
+    # Create first execution
+    record1 = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id="camp_target_123",
+        )
+    )
+    matches = repo.get_by_campaign_id("camp_target_123")
+    assert len(matches) == 1
+    assert matches[0].id == record1.id
+    assert matches[0].campaign_id == "camp_target_123"
+
+
+def test_repo_get_events_by_resource_id(session: Session, approved_experiment: Experiment):
+    """Verify ExternalExecutionRepository.get_events_by_resource_id finds matching events."""
+    repo = ExternalExecutionRepository(session)
+    record = repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=SAMPLE_ACCOUNT_ID,
+            campaign_id="camp_res_123",
+        )
+    )
+    # Empty query returns empty list
+    assert repo.get_events_by_resource_id("") == []
+
+    ev1 = repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=record.id,
+            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+            tier="campaign",
+            new_resource_id="camp_res_123",
+            reason="Campaign created",
+        )
+    )
+    ev2 = repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=record.id,
+            event_type=ExternalExecutionEventType.EMERGENCY_STOP.value,
+            tier="campaign",
+            new_resource_id="camp_res_123",
+            reason="Campaign paused",
+        )
+    )
+    ev3 = repo.record_event(
+        ExternalExecutionEvent(
+            execution_id=record.id,
+            event_type=ExternalExecutionEventType.RESOURCE_SUPERSEDED.value,
+            tier="adset",
+            old_resource_id="adset_old_999",
+            new_resource_id="adset_new_888",
+            reason="Adset replaced",
+        )
+    )
+
+    camp_events = repo.get_events_by_resource_id("camp_res_123", tier="campaign")
+    assert len(camp_events) == 2
+    assert [e.id for e in camp_events] == [ev1.id, ev2.id]
+
+    adset_events = repo.get_events_by_resource_id("adset_old_999", tier="adset")
+    assert len(adset_events) == 1
+    assert adset_events[0].id == ev3.id
 
 
 # ── B. Dispatch Validation Tests ─────────────────────────────────────────────
