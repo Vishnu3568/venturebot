@@ -14,9 +14,11 @@ from venturebot.database.connection import get_engine, get_session_factory, init
 from venturebot.database.models import ExperimentORM, OpportunityORM
 from venturebot.database.repositories.capital import CapitalRepository
 from venturebot.database.repositories.experiment import ExperimentRepository
+from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.database.repositories.opportunity import OpportunityRepository
 from venturebot.env import is_safe_mode
 from venturebot.execution.dispatch import (
+    DeprecatedGatewayError,
     ExecutionAction,
     ExecutionDispatchResult,
     ExecutionDispatchService,
@@ -29,7 +31,7 @@ from venturebot.execution.meta import (
     MetaMarketingApiAdapter,
 )
 from venturebot.models.experiment import Channel, Experiment, ExperimentStatus, MonetizationMethod
-from venturebot.models.external_execution import ExternalExecutionStatus
+from venturebot.models.external_execution import ExternalExecution, ExternalExecutionStatus
 from venturebot.models.opportunity import Opportunity, OpportunityCategory, OpportunityStatus
 
 
@@ -447,7 +449,10 @@ def _make_mock_meta_transport():
     import json
     import urllib.request
 
+    recorded_requests: list[urllib.request.Request] = []
+
     def _transport(req: urllib.request.Request, timeout: float = 10.0) -> bytes:
+        recorded_requests.append(req)
         url = req.full_url
         method = req.get_method()
 
@@ -498,6 +503,7 @@ def _make_mock_meta_transport():
 
         return json.dumps({"id": "default_mock_id"}).encode("utf-8")
 
+    _transport.requests = recorded_requests  # type: ignore[attr-defined]
     return _transport
 
 
@@ -598,13 +604,14 @@ def test_step41_e_safe_mode_true_blocks_deploy_experiment_before_tier2(
 def test_step41_f_safe_mode_false_allows_request_to_reach_tier2_using_mock_transport(
     approved_experiment: ExperimentORM, db_session: Session, monkeypatch: pytest.MonkeyPatch
 ):
-    """F. Verify SAFE_MODE=False allows the request to reach Tier 2 using mocked transport."""
+    """F. Verify dispatch() with SAFE_MODE=False fails closed because monolithic gateway is deprecated."""
     monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
     spec = _make_valid_meta_spec(approved_experiment.id)
+    transport = _make_mock_meta_transport()
     adapter = MetaMarketingApiAdapter(
         ad_account_id=spec.ad_account_id,
         access_token="fake_token_test",
-        transport=_make_mock_meta_transport(),
+        transport=transport,
     )
 
     req = ExecutionRequest(
@@ -622,17 +629,16 @@ def test_step41_f_safe_mode_false_allows_request_to_reach_tier2_using_mock_trans
         adapter=adapter,
     )
 
-    assert res.success is True
-    assert res.blocked is False
-    assert res.reason == "DEPLOYED"
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.DEPLOYED
-    assert res.execution.campaign_id == "camp_step41"
-    assert res.execution.adset_id == "adset_step41"
-    assert res.execution.creative_id == "creative_step41"
-    assert res.execution.ad_id == "ad_step41"
-    assert res.experiment is not None
-    assert res.experiment.status == ExperimentStatus.RUNNING
+    # Monolithic deployment gateway is deprecated and hard-blocked
+    assert res.success is False
+    assert res.blocked is True
+    assert "LEGACY_DISPATCH_DEPRECATED" in (res.reason or "")
+    # Zero adapter write requests were made
+    assert len(transport.requests) == 0  # type: ignore[attr-defined]
+    # Experiment remains APPROVED, NEVER RUNNING
+    exp_db = ExperimentRepository(db_session).get(approved_experiment.id)
+    assert exp_db is not None
+    assert exp_db.status == ExperimentStatus.APPROVED
 
 
 def test_step41_g_meta_dispatcher_has_no_public_dispatch_method():
@@ -644,37 +650,36 @@ def test_step41_g_meta_dispatcher_has_no_public_dispatch_method():
 def test_step41_h_dispatch_from_gateway_rejects_missing_or_invalid_context(
     approved_experiment: ExperimentORM, db_session: Session
 ):
-    """H. Verify _dispatch_from_gateway() rejects missing or invalid gateway context."""
+    """H. Verify _dispatch_from_gateway() immediately raises DeprecatedGatewayError."""
     spec = _make_valid_meta_spec(approved_experiment.id)
+    transport = _make_mock_meta_transport()
     adapter = MetaMarketingApiAdapter(
         ad_account_id=spec.ad_account_id,
         access_token="fake_token_test",
-        transport=_make_mock_meta_transport(),
+        transport=transport,
     )
 
     # 1. Non-context object
-    res_none = MetaExperimentDispatchService._dispatch_from_gateway(
-        session=db_session,
-        experiment_id=approved_experiment.id,
-        spec=spec,
-        adapter=adapter,
-        safe_mode=False,
-        gateway_context=None,  # type: ignore[arg-type]
-    )
-    assert res_none.is_successful is False
-    assert "Missing or invalid gateway invocation context" in (res_none.rejection_reason or "")
+    with pytest.raises(DeprecatedGatewayError, match="LEGACY_DISPATCH_DEPRECATED"):
+        MetaExperimentDispatchService._dispatch_from_gateway(
+            session=db_session,
+            experiment_id=approved_experiment.id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=False,
+            gateway_context=None,  # type: ignore[arg-type]
+        )
 
     # 2. String/boolean pretending to be trust flag
-    res_fake = MetaExperimentDispatchService._dispatch_from_gateway(
-        session=db_session,
-        experiment_id=approved_experiment.id,
-        spec=spec,
-        adapter=adapter,
-        safe_mode=False,
-        gateway_context=True,  # type: ignore[arg-type]
-    )
-    assert res_fake.is_successful is False
-    assert "Missing or invalid gateway invocation context" in (res_fake.rejection_reason or "")
+    with pytest.raises(DeprecatedGatewayError, match="LEGACY_DISPATCH_DEPRECATED"):
+        MetaExperimentDispatchService._dispatch_from_gateway(
+            session=db_session,
+            experiment_id=approved_experiment.id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=False,
+            gateway_context=True,  # type: ignore[arg-type]
+        )
 
     # 3. Context with mismatched experiment_id
     mismatched_ctx = _GatewayInvocationContext(
@@ -682,27 +687,30 @@ def test_step41_h_dispatch_from_gateway_rejects_missing_or_invalid_context(
         proposed_budget=Decimal("50.00"),
         channel="meta",
     )
-    res_mismatch = MetaExperimentDispatchService._dispatch_from_gateway(
-        session=db_session,
-        experiment_id=approved_experiment.id,
-        spec=spec,
-        adapter=adapter,
-        safe_mode=False,
-        gateway_context=mismatched_ctx,
-    )
-    assert res_mismatch.is_successful is False
-    assert "does not match target experiment" in (res_mismatch.rejection_reason or "")
+    with pytest.raises(DeprecatedGatewayError, match="LEGACY_DISPATCH_DEPRECATED"):
+        MetaExperimentDispatchService._dispatch_from_gateway(
+            session=db_session,
+            experiment_id=approved_experiment.id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=False,
+            gateway_context=mismatched_ctx,
+        )
+
+    # Zero adapter calls made
+    assert len(transport.requests) == 0  # type: ignore[attr-defined]
 
 
 def test_step41_i_dispatch_from_gateway_independently_blocks_when_safe_mode_true(
     approved_experiment: ExperimentORM, db_session: Session
 ):
-    """I. Verify _dispatch_from_gateway() independently blocks when SAFE_MODE=True."""
+    """I. Verify _dispatch_from_gateway() immediately raises DeprecatedGatewayError even when SAFE_MODE=True."""
     spec = _make_valid_meta_spec(approved_experiment.id)
+    transport = _make_mock_meta_transport()
     adapter = MetaMarketingApiAdapter(
         ad_account_id=spec.ad_account_id,
         access_token="fake_token_test",
-        transport=_make_mock_meta_transport(),
+        transport=transport,
     )
     ctx = _GatewayInvocationContext(
         experiment_id=approved_experiment.id,
@@ -710,45 +718,53 @@ def test_step41_i_dispatch_from_gateway_independently_blocks_when_safe_mode_true
         channel="meta",
     )
 
-    # Calling with safe_mode=True
-    res = MetaExperimentDispatchService._dispatch_from_gateway(
-        session=db_session,
-        experiment_id=approved_experiment.id,
-        spec=spec,
-        adapter=adapter,
-        safe_mode=True,
-        gateway_context=ctx,
-    )
-    assert res.is_successful is False
-    assert res.rejection_reason == "SAFE_MODE_ENABLED"
+    # Calling with safe_mode=True raises DeprecatedGatewayError immediately
+    with pytest.raises(DeprecatedGatewayError, match="LEGACY_DISPATCH_DEPRECATED"):
+        MetaExperimentDispatchService._dispatch_from_gateway(
+            session=db_session,
+            experiment_id=approved_experiment.id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=True,
+            gateway_context=ctx,
+        )
+
+    # Zero adapter calls made
+    assert len(transport.requests) == 0  # type: ignore[attr-defined]
 
 
 def test_step41_j_emergency_stop_gateway(
     approved_experiment: ExperimentORM, db_session: Session, monkeypatch: pytest.MonkeyPatch
 ):
-    """J. Verify ExecutionDispatchService.emergency_stop() coordinates external pause then internal kill."""
+    """J. Verify ExecutionDispatchService.emergency_stop() coordinates external pause then internal kill without legacy gateway."""
     monkeypatch.setenv("VENTUREBOT_SAFE_MODE", "false")
     spec = _make_valid_meta_spec(approved_experiment.id)
+    transport = _make_mock_meta_transport()
     adapter = MetaMarketingApiAdapter(
         ad_account_id=spec.ad_account_id,
         access_token="fake_token_test",
-        transport=_make_mock_meta_transport(),
+        transport=transport,
     )
 
-    # Deploy first via gateway
-    req = ExecutionRequest(
-        experiment_id=approved_experiment.id,
-        requested_action=ExecutionAction.DEPLOY_EXPERIMENT,
-        proposed_budget=Decimal("50.00"),
+    # Seed execution directly in DB without invoking deprecated monolithic dispatch
+    exec_repo = ExternalExecutionRepository(db_session, auto_commit=True)
+    execution = exec_repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=spec.ad_account_id,
+            campaign_id="camp_step41",
+            adset_id="adset_step41",
+            creative_id="creative_step41",
+            ad_id="ad_step41",
+            status=ExternalExecutionStatus.DEPLOYED,
+        )
     )
-    disp_res = ExecutionDispatchService.dispatch(
-        req,
-        session=db_session,
-        safe_mode=False,
-        spec=spec,
-        adapter=adapter,
-    )
-    assert disp_res.success is True
+    # Transition experiment to RUNNING to test emergency stop
+    exp_repo = ExperimentRepository(db_session, auto_commit=True)
+    exp = exp_repo.get(approved_experiment.id)
+    assert exp is not None
+    exp_repo.update_status(exp.id, status=ExperimentStatus.RUNNING)
 
     # Now trigger emergency stop via public ExecutionDispatchService gateway
     stop_res = ExecutionDispatchService.emergency_stop(

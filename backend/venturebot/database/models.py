@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, Numeric, String, Text, Uuid
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -354,4 +354,27 @@ class ExternalExecutionEventORM(Base):
 
     # Relationships
     execution: Mapped[ExternalExecutionORM] = relationship("ExternalExecutionORM", back_populates="events")
+
+
+class DeploymentClaimORM(Base):
+    """Transactional claim record providing cross-process and cross-thread mutual exclusion for resource creation."""
+    __tablename__ = "deployment_claims"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    tier: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    claim_token: Mapped[str] = mapped_column(String(100), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "tier", name="uq_deployment_claims_exp_tier"),
+    )
 

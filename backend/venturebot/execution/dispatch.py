@@ -9,13 +9,16 @@ from enum import Enum
 import json
 from pathlib import Path
 import re
+import threading
+import time
 from typing import Any
+import uuid
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from venturebot.database.models import ExperimentORM, OpportunityORM
+from venturebot.database.models import DeploymentClaimORM, ExperimentORM, OpportunityORM
 from venturebot.database.repositories.capital import CapitalRepository
 from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.env import is_safe_mode
@@ -254,6 +257,116 @@ def classify_execution_lineage(
     return (RecoveryLineageClassification.OPTION_B, orig_id, None)
 
 
+_TIER_THREAD_LOCKS: dict[tuple[UUID, str], threading.Lock] = {}
+_TIER_LOCKS_MUTEX = threading.Lock()
+
+
+def _get_tier_thread_lock(experiment_id: UUID, tier: str) -> threading.Lock:
+    with _TIER_LOCKS_MUTEX:
+        key = (experiment_id, tier)
+        if key not in _TIER_THREAD_LOCKS:
+            _TIER_THREAD_LOCKS[key] = threading.Lock()
+        return _TIER_THREAD_LOCKS[key]
+
+
+class ConcurrentDeploymentError(Exception):
+    """Raised when another deployment operation holds an active claim on the tier."""
+    pass
+
+
+class DeprecatedGatewayError(RuntimeError):
+    """Raised when an attempt is made to invoke the deprecated monolithic Meta deployment gateway."""
+    pass
+
+
+@contextmanager
+def claim_deployment_tier(
+    session: Session,
+    experiment_id: UUID,
+    tier: str,
+    timeout_seconds: float = 10.0,
+    claim_ttl_seconds: float = 60.0,
+):
+    """Transactional context manager acquiring an in-process thread lock and cross-process database claim.
+
+    Guarantees that at most one thread/process can execute remote resource creation for a given
+    (experiment_id, tier) at any point in time. Automatically recovers from abandoned claims
+    if the holding process crashed (claim_ttl_seconds elapsed).
+    """
+    thread_lock = _get_tier_thread_lock(experiment_id, tier)
+    acquired_thread = thread_lock.acquire(timeout=timeout_seconds)
+    if not acquired_thread:
+        raise ConcurrentDeploymentError(
+            f"CONCURRENT_MUTATION_IN_PROGRESS: In-process thread lock for {tier} could not be acquired within {timeout_seconds}s."
+        )
+
+    claim_token = str(uuid.uuid4())
+    start_time = time.monotonic()
+    db_claimed = False
+
+    try:
+        # Cross-process DB claim via DeploymentClaimORM
+        while time.monotonic() - start_time < timeout_seconds:
+            now_utc = datetime.now(timezone.utc)
+            existing = (
+                session.query(DeploymentClaimORM)
+                .filter_by(experiment_id=experiment_id, tier=tier)
+                .first()
+            )
+            if existing is not None:
+                exp_at = existing.expires_at
+                if exp_at.tzinfo is None:
+                    exp_at = exp_at.replace(tzinfo=timezone.utc)
+                if exp_at < now_utc:
+                    # Abandoned claim recovery from crashed process
+                    try:
+                        session.delete(existing)
+                        session.commit()
+                    except Exception:
+                        session.rollback()
+                else:
+                    # Active claim held by another process: wait briefly and retry
+                    time.sleep(0.05)
+                    continue
+
+            try:
+                new_claim = DeploymentClaimORM(
+                    id=uuid.uuid4(),
+                    experiment_id=experiment_id,
+                    tier=tier,
+                    claim_token=claim_token,
+                    claimed_at=now_utc,
+                    expires_at=now_utc + timedelta(seconds=claim_ttl_seconds),
+                )
+                session.add(new_claim)
+                session.commit()
+                db_claimed = True
+                break
+            except Exception:
+                session.rollback()
+                time.sleep(0.05)
+
+        if not db_claimed:
+            raise ConcurrentDeploymentError(
+                f"CONCURRENT_MUTATION_IN_PROGRESS: Database claim for {tier} (experiment {experiment_id}) could not be acquired within {timeout_seconds}s."
+            )
+
+        yield claim_token
+
+    finally:
+        if db_claimed:
+            try:
+                session.query(DeploymentClaimORM).filter_by(
+                    experiment_id=experiment_id,
+                    tier=tier,
+                    claim_token=claim_token,
+                ).delete()
+                session.commit()
+            except Exception:
+                session.rollback()
+        thread_lock.release()
+
+
 class ExecutionDispatchService:
     """Safe execution dispatch layer acting as the single gateway for future real-world actions.
 
@@ -386,7 +499,7 @@ class ExecutionDispatchService:
                 experiment_id=request.experiment_id,
             )
 
-        # 8. Composite DEPLOY_EXPERIMENT delegation
+        # 8. Composite DEPLOY_EXPERIMENT delegation (PERMANENTLY DEPRECATED & BLOCKED)
         if request.requested_action in (
             ExecutionAction.DEPLOY_EXPERIMENT.value,
             ExecutionAction.DEPLOY_EXPERIMENT,
@@ -397,50 +510,15 @@ class ExecutionDispatchService:
                 else "meta"
             )
             if channel == "meta":
-                target_spec = spec or (request.metadata.get("spec") if request.metadata else None)
-                target_adapter = adapter or (request.metadata.get("adapter") if request.metadata else None)
-
-                if target_spec is None:
-                    return ExecutionDispatchResult(
-                        success=False,
-                        blocked=True,
-                        reason="Missing MetaExecutionSpecification for Meta deployment.",
-                        action_attempted=request.requested_action,
-                        experiment_id=request.experiment_id,
-                    )
-
-                if session is None:
-                    return ExecutionDispatchResult(
-                        success=False,
-                        blocked=True,
-                        reason="Active database session is required for Meta deployment.",
-                        action_attempted=request.requested_action,
-                        experiment_id=request.experiment_id,
-                    )
-
-                # Construct internal gateway invocation context
-                ctx = _GatewayInvocationContext(
-                    experiment_id=request.experiment_id,
-                    proposed_budget=request.proposed_budget,
-                    channel=channel,
-                )
-
-                meta_res = MetaExperimentDispatchService._dispatch_from_gateway(
-                    session=session,
-                    experiment_id=request.experiment_id,
-                    spec=target_spec,
-                    adapter=target_adapter,
-                    safe_mode=safe_mode,
-                    gateway_context=ctx,
-                )
                 return ExecutionDispatchResult(
-                    success=meta_res.is_successful,
-                    blocked=not meta_res.is_successful,
-                    reason=meta_res.rejection_reason or "DEPLOYED",
+                    success=False,
+                    blocked=True,
+                    reason=(
+                        "LEGACY_DISPATCH_DEPRECATED: Monolithic deployment via dispatch() is deprecated "
+                        "and permanently blocked. Use granular recovery deployment tiers."
+                    ),
                     action_attempted=request.requested_action,
                     experiment_id=request.experiment_id,
-                    execution=meta_res.execution,
-                    experiment=meta_res.experiment,
                 )
 
             return ExecutionDispatchResult(
@@ -629,7 +707,7 @@ class ExecutionDispatchService:
         return exec_repo.record_event(event)
 
     @classmethod
-    def deploy_recovery_dormant(
+    def deploy_recovery_adset_dormant(
         cls,
         session: Session,
         experiment_id: UUID,
@@ -640,7 +718,7 @@ class ExecutionDispatchService:
         version: int = 2,
         auto_commit: bool = True,
     ) -> RecoveryDormantResult:
-        """Phase 1: Deploy dormant replacement ad set, creative, and ad under existing campaign.
+        """Phase 1.A: Deploy only the dormant replacement ad set under existing campaign.
 
         Invariants:
         1. SAFE_MODE must be False (explicitly un-gated for authorized execution).
@@ -652,8 +730,8 @@ class ExecutionDispatchService:
         7. Original expired ad set is preserved as-is (never deleted, modified, or archived).
         8. Audit event is recorded for superseding the original ad set.
         9. Replacement ad set is created in PAUSED status with a 24h buffer schedule.
-        10. Creative and Ad are created in PAUSED status.
-        11. Experiment status remains APPROVED (actual_start remains None).
+        10. Persists replacement ad-set ID and PARTIAL_ADSET status.
+        11. Does NOT deploy or touch creative or ad tiers. Returns immediately.
         """
         # 1. Non-bypassable SAFE_MODE enforcement
         if is_safe_mode_enforced(safe_mode):
@@ -786,9 +864,6 @@ class ExecutionDispatchService:
                 )
 
             # Rule A.7 & A.8: Trusted Operator Authentication Trust Boundary Enforcement
-            # VentureBot lacks a trusted operator authentication/authorization provider (session/crypto/RBAC).
-            # A caller-supplied operator_id string cannot establish an authentic trust boundary.
-            # Recovery versions above 2 remain strictly blocked.
             operator_id = payload.get("operator_id") or "UNKNOWN"
             return RecoveryDormantResult(
                 success=False,
@@ -855,6 +930,15 @@ class ExecutionDispatchService:
                 experiment_id=experiment_id,
             )
 
+        if execution.status in (ExternalExecutionStatus.ACTIVATED.value, ExternalExecutionStatus.DEPLOYED.value):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Execution already in live/activated state: {execution.status}",
+                experiment_id=experiment_id,
+                execution=execution,
+            )
+
         if adapter is None:
             adapter = MetaMarketingApiAdapter(ad_account_id=spec.ad_account_id)
 
@@ -911,6 +995,15 @@ class ExecutionDispatchService:
         )
 
         if adset_lookup.status == ReconciliationStatus.FOUND_EXACT:
+            adset_status = (adset_lookup.details or {}).get("status")
+            if adset_status and str(adset_status).upper() != "PAUSED":
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=f"UNEXPECTED_RESOURCE_STATUS: Existing replacement ad set status is '{adset_status}', expected 'PAUSED'.",
+                    experiment_id=experiment_id,
+                    execution=execution,
+                )
             new_adset_id = adset_lookup.resource_id
             exec_repo.record_event(
                 ExternalExecutionEvent(
@@ -924,32 +1017,92 @@ class ExecutionDispatchService:
                 )
             )
         elif adset_lookup.status == ReconciliationStatus.NOT_FOUND:
-            now_utc = datetime.now(timezone.utc)
-            buffer_start = now_utc + timedelta(hours=24)
-            buffer_end = buffer_start + timedelta(hours=48)
             try:
-                new_adset_id = adapter.create_adset(
-                    campaign_id=execution.campaign_id,
-                    name=replacement_name,
-                    lifetime_budget_paise=inr_to_paise(spec.authorized_budget),
-                    end_time=buffer_end,
-                    start_time=buffer_start,
-                    countries=spec.countries,
-                    age_min=spec.age_min,
-                    age_max=spec.age_max,
-                    status="PAUSED",
-                    ad_account_id=spec.ad_account_id,
-                )
-                exec_repo.record_event(
-                    ExternalExecutionEvent(
-                        execution_id=execution.id,
-                        event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
-                        tier="adset",
-                        old_resource_id=None,
-                        new_resource_id=new_adset_id,
-                        reason=f"Created dormant replacement ad set ({replacement_name}) with 24h buffer schedule",
-                        api_request_summary=json.dumps({"name": replacement_name, "version": version}),
-                    )
+                with claim_deployment_tier(session, experiment_id, "adset"):
+                    # Double-check: refresh execution and lookup within claim to prevent concurrent creation
+                    session.expire_all()
+                    execution = exec_repo.get_by_experiment_id(experiment_id)
+                    if execution and execution.adset_id and execution.status in (
+                        ExternalExecutionStatus.PARTIAL_ADSET.value,
+                        ExternalExecutionStatus.PARTIAL_CREATIVE.value,
+                        ExternalExecutionStatus.DEPLOYED_DORMANT.value,
+                    ):
+                        new_adset_id = execution.adset_id
+                    else:
+                        adset_lookup_dc = adapter.lookup_adset(
+                            campaign_id=execution.campaign_id,
+                            adset_name=replacement_name,
+                            expected_lifetime_budget_paise=inr_to_paise(spec.authorized_budget),
+                        )
+                        if adset_lookup_dc.status == ReconciliationStatus.FOUND_EXACT:
+                            adset_status = (adset_lookup_dc.details or {}).get("status")
+                            if adset_status and str(adset_status).upper() != "PAUSED":
+                                return RecoveryDormantResult(
+                                    success=False,
+                                    blocked=True,
+                                    reason=f"UNEXPECTED_RESOURCE_STATUS: Existing replacement ad set status is '{adset_status}', expected 'PAUSED'.",
+                                    experiment_id=experiment_id,
+                                    execution=execution,
+                                )
+                            new_adset_id = adset_lookup_dc.resource_id
+                            exec_repo.record_event(
+                                ExternalExecutionEvent(
+                                    execution_id=execution.id,
+                                    event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+                                    tier="adset",
+                                    old_resource_id=None,
+                                    new_resource_id=new_adset_id,
+                                    reason=f"Adopted existing replacement ad set ({replacement_name})",
+                                    api_request_summary=json.dumps({"name": replacement_name, "version": version}),
+                                )
+                            )
+                        elif adset_lookup_dc.status == ReconciliationStatus.NOT_FOUND:
+                            now_utc = datetime.now(timezone.utc)
+                            buffer_start = now_utc + timedelta(hours=24)
+                            buffer_end = buffer_start + timedelta(hours=48)
+                            new_adset_id = adapter.create_adset(
+                                campaign_id=execution.campaign_id,
+                                name=replacement_name,
+                                lifetime_budget_paise=inr_to_paise(spec.authorized_budget),
+                                end_time=buffer_end,
+                                start_time=buffer_start,
+                                countries=spec.countries,
+                                age_min=spec.age_min,
+                                age_max=spec.age_max,
+                                status="PAUSED",
+                                ad_account_id=spec.ad_account_id,
+                            )
+                            exec_repo.record_event(
+                                ExternalExecutionEvent(
+                                    execution_id=execution.id,
+                                    event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+                                    tier="adset",
+                                    old_resource_id=None,
+                                    new_resource_id=new_adset_id,
+                                    reason=f"Created dormant replacement ad set ({replacement_name}) with 24h buffer schedule",
+                                    api_request_summary=json.dumps({"name": replacement_name, "version": version}),
+                                )
+                            )
+                        else:
+                            return RecoveryDormantResult(
+                                success=False,
+                                blocked=True,
+                                reason=f"Ambiguous or unknown replacement ad set state: {adset_lookup_dc.error_message}",
+                                experiment_id=experiment_id,
+                            )
+                        # Persist ad set ID and state immediately within claim before releasing lock
+                        execution.adset_id = new_adset_id
+                        if execution.status != ExternalExecutionStatus.DEPLOYED_DORMANT.value:
+                            execution.status = ExternalExecutionStatus.PARTIAL_ADSET
+                        execution.last_error = None
+                        execution = exec_repo.save(execution)
+            except ConcurrentDeploymentError as cde:
+                return RecoveryDormantResult(
+                    success=False,
+                    blocked=True,
+                    reason=str(cde),
+                    experiment_id=experiment_id,
+                    execution=execution,
                 )
             except Exception as e:
                 execution.status = ExternalExecutionStatus.FAILED
@@ -971,9 +1124,161 @@ class ExecutionDispatchService:
             )
 
         execution.adset_id = new_adset_id
-        execution.status = ExternalExecutionStatus.PARTIAL_ADSET
+        if execution.status != ExternalExecutionStatus.DEPLOYED_DORMANT.value:
+            execution.status = ExternalExecutionStatus.PARTIAL_ADSET
         execution.last_error = None
         execution = exec_repo.save(execution)
+
+        return RecoveryDormantResult(
+            success=True,
+            experiment_id=experiment_id,
+            execution=execution,
+            adset_id=execution.adset_id,
+        )
+
+    @classmethod
+    def deploy_recovery_creative_dormant(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        spec: MetaExecutionSpecification,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+        auto_commit: bool = True,
+    ) -> RecoveryDormantResult:
+        """Phase 1.B: Deploy only the creative under existing replacement ad set state.
+
+        Invariants:
+        1. SAFE_MODE must be False (explicitly un-gated for authorized execution).
+        2. Explicit operator authorization is required.
+        3. Experiment must exist and be in APPROVED status.
+        4. Valid replacement ad-set must be persisted in execution record (adset_id present).
+        5. Performs creative lookup and adopts existing creative if found exact.
+        6. Creates creative in Live Mode if not found.
+        7. Persists creative ID and updates status to PARTIAL_CREATIVE.
+        8. Does NOT deploy or touch ad tier. Returns immediately.
+        """
+        # 1. Non-bypassable SAFE_MODE enforcement
+        if is_safe_mode_enforced(safe_mode):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="SAFE_MODE_ENABLED",
+                experiment_id=experiment_id,
+            )
+
+        if not explicit_auth:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="EXPLICIT_AUTHORIZATION_REQUIRED",
+                experiment_id=experiment_id,
+            )
+
+        exp_orm = session.get(ExperimentORM, experiment_id)
+        if exp_orm is None:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="EXPERIMENT_NOT_FOUND",
+                experiment_id=experiment_id,
+            )
+
+        if exp_orm.status != ExperimentStatus.APPROVED.value:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Experiment in '{exp_orm.status}' status; expected APPROVED",
+                experiment_id=experiment_id,
+            )
+
+        cap_repo = CapitalRepository(session, auto_commit=False)
+        actual_spend = cap_repo.get_experiment_actual_spend(experiment_id)
+        if actual_spend > Decimal("0.00"):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="ACTUAL_SPEND_EXCEEDS_ZERO",
+                experiment_id=experiment_id,
+            )
+
+        if exp_orm.allocated_budget != Decimal("200.00"):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Allocated budget is {exp_orm.allocated_budget}, expected 200.00",
+                experiment_id=experiment_id,
+            )
+
+        if spec.authorized_budget > exp_orm.allocated_budget:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="AUTHORIZED_BUDGET_EXCEEDS_ALLOCATION",
+                experiment_id=experiment_id,
+            )
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None or not execution.adset_id:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="MISSING_ADSET_PREREQUISITE: Replacement ad set must be deployed before creative.",
+                experiment_id=experiment_id,
+                execution=execution,
+            )
+
+        if execution.status in (ExternalExecutionStatus.ACTIVATED.value, ExternalExecutionStatus.DEPLOYED.value):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Execution already in live/activated state: {execution.status}",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+            )
+
+        # Prerequisite: Tier 1 (PARTIAL_ADSET) must have been completed.
+        if execution.status not in (
+            ExternalExecutionStatus.PARTIAL_ADSET.value,
+            ExternalExecutionStatus.PARTIAL_CREATIVE.value,
+            ExternalExecutionStatus.DEPLOYED_DORMANT.value,
+        ):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"INVALID_PREREQUISITE_STATE: Execution in '{execution.status}' status; Tier 1 (PARTIAL_ADSET) must complete before creative deployment.",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+            )
+
+        if not execution.image_hash:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="MISSING_IMAGE_HASH: Image hash is required for creative creation.",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+            )
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=spec.ad_account_id)
+
+        # Proactive Meta Access Token Expiry Validation (covers 48h flight + 24h buffer = 72h)
+        token_insp = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+        if token_insp.status != TokenStatus.VALID:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"TOKEN_PREFLIGHT_FAILED: {token_insp.status.value} - {_sanitize_error(token_insp.rejection_reason or '')}",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+            )
 
         # Creative Tier
         if not execution.creative_id:
@@ -999,26 +1304,76 @@ class ExecutionDispatchService:
                 )
             elif c_lookup.status == ReconciliationStatus.NOT_FOUND:
                 try:
-                    c_id = adapter.create_creative(
-                        name=creative_name,
-                        page_id=spec.page_id,
-                        link=spec.destination_url,
-                        message=spec.primary_text,
-                        headline=spec.headline,
-                        image_hash=execution.image_hash or "",
-                        call_to_action=spec.call_to_action,
-                        ad_account_id=spec.ad_account_id,
-                    )
-                    execution.creative_id = c_id
-                    exec_repo.record_event(
-                        ExternalExecutionEvent(
-                            execution_id=execution.id,
-                            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
-                            tier="creative",
-                            old_resource_id=None,
-                            new_resource_id=c_id,
-                            reason="Created ad creative in Live Mode",
-                        )
+                    with claim_deployment_tier(session, experiment_id, "creative"):
+                        # Double-check: refresh execution and lookup within claim
+                        session.expire_all()
+                        execution = exec_repo.get_by_experiment_id(experiment_id)
+                        if execution and execution.creative_id:
+                            pass  # Already created/adopted
+                        else:
+                            c_lookup_dc = adapter.lookup_creative(
+                                creative_name=creative_name,
+                                page_id=spec.page_id,
+                                image_hash=execution.image_hash or "",
+                                destination_url=spec.destination_url,
+                                ad_account_id=spec.ad_account_id,
+                            )
+                            if c_lookup_dc.status == ReconciliationStatus.FOUND_EXACT:
+                                execution.creative_id = c_lookup_dc.resource_id
+                                exec_repo.record_event(
+                                    ExternalExecutionEvent(
+                                        execution_id=execution.id,
+                                        event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+                                        tier="creative",
+                                        old_resource_id=None,
+                                        new_resource_id=execution.creative_id,
+                                        reason="Adopted existing creative",
+                                    )
+                                )
+                            elif c_lookup_dc.status == ReconciliationStatus.NOT_FOUND:
+                                c_id = adapter.create_creative(
+                                    name=creative_name,
+                                    page_id=spec.page_id,
+                                    link=spec.destination_url,
+                                    message=spec.primary_text,
+                                    headline=spec.headline,
+                                    image_hash=execution.image_hash or "",
+                                    call_to_action=spec.call_to_action,
+                                    ad_account_id=spec.ad_account_id,
+                                )
+                                execution.creative_id = c_id
+                                exec_repo.record_event(
+                                    ExternalExecutionEvent(
+                                        execution_id=execution.id,
+                                        event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+                                        tier="creative",
+                                        old_resource_id=None,
+                                        new_resource_id=c_id,
+                                        reason="Created ad creative in Live Mode",
+                                    )
+                                )
+                            else:
+                                return RecoveryDormantResult(
+                                    success=False,
+                                    blocked=True,
+                                    reason=f"Ambiguous creative lookup: {c_lookup_dc.error_message}",
+                                    experiment_id=experiment_id,
+                                    execution=execution,
+                                    adset_id=execution.adset_id,
+                                )
+                        # Persist creative ID and state immediately within claim before releasing lock
+                        if execution.status != ExternalExecutionStatus.DEPLOYED_DORMANT.value:
+                            execution.status = ExternalExecutionStatus.PARTIAL_CREATIVE
+                        execution.last_error = None
+                        execution = exec_repo.save(execution)
+                except ConcurrentDeploymentError as cde:
+                    return RecoveryDormantResult(
+                        success=False,
+                        blocked=True,
+                        reason=str(cde),
+                        experiment_id=experiment_id,
+                        execution=execution,
+                        adset_id=execution.adset_id,
                     )
                 except Exception as e:
                     execution.status = ExternalExecutionStatus.FAILED
@@ -1042,9 +1397,163 @@ class ExecutionDispatchService:
                     adset_id=execution.adset_id,
                 )
 
+        if execution.status != ExternalExecutionStatus.DEPLOYED_DORMANT.value:
             execution.status = ExternalExecutionStatus.PARTIAL_CREATIVE
-            execution.last_error = None
-            execution = exec_repo.save(execution)
+        execution.last_error = None
+        execution = exec_repo.save(execution)
+
+        return RecoveryDormantResult(
+            success=True,
+            experiment_id=experiment_id,
+            execution=execution,
+            adset_id=execution.adset_id,
+            creative_id=execution.creative_id,
+        )
+
+    @classmethod
+    def deploy_recovery_ad_dormant(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        spec: MetaExecutionSpecification,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+        auto_commit: bool = True,
+    ) -> RecoveryDormantResult:
+        """Phase 1.C: Deploy only the ad in PAUSED status under replacement ad set and creative.
+
+        Invariants:
+        1. SAFE_MODE must be False (explicitly un-gated for authorized execution).
+        2. Explicit operator authorization is required.
+        3. Experiment must exist and be in APPROVED status.
+        4. Valid replacement ad set AND creative must be persisted in execution record.
+        5. Performs ad lookup and adopts existing ad if found exact.
+        6. Creates ad in PAUSED status for policy review if not found.
+        7. Persists ad ID and updates status to DEPLOYED_DORMANT.
+        """
+        # 1. Non-bypassable SAFE_MODE enforcement
+        if is_safe_mode_enforced(safe_mode):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="SAFE_MODE_ENABLED",
+                experiment_id=experiment_id,
+            )
+
+        if not explicit_auth:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="EXPLICIT_AUTHORIZATION_REQUIRED",
+                experiment_id=experiment_id,
+            )
+
+        exp_orm = session.get(ExperimentORM, experiment_id)
+        if exp_orm is None:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="EXPERIMENT_NOT_FOUND",
+                experiment_id=experiment_id,
+            )
+
+        if exp_orm.status != ExperimentStatus.APPROVED.value:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Experiment in '{exp_orm.status}' status; expected APPROVED",
+                experiment_id=experiment_id,
+            )
+
+        cap_repo = CapitalRepository(session, auto_commit=False)
+        actual_spend = cap_repo.get_experiment_actual_spend(experiment_id)
+        if actual_spend > Decimal("0.00"):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="ACTUAL_SPEND_EXCEEDS_ZERO",
+                experiment_id=experiment_id,
+            )
+
+        if exp_orm.allocated_budget != Decimal("200.00"):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Allocated budget is {exp_orm.allocated_budget}, expected 200.00",
+                experiment_id=experiment_id,
+            )
+
+        if spec.authorized_budget > exp_orm.allocated_budget:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="AUTHORIZED_BUDGET_EXCEEDS_ALLOCATION",
+                experiment_id=experiment_id,
+            )
+
+        exec_repo = ExternalExecutionRepository(session, auto_commit=auto_commit)
+        execution = exec_repo.get_by_experiment_id(experiment_id)
+        if execution is None or not execution.adset_id:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="MISSING_ADSET_PREREQUISITE: Replacement ad set must be deployed before ad.",
+                experiment_id=experiment_id,
+                execution=execution,
+            )
+
+        if not execution.creative_id:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason="MISSING_CREATIVE_PREREQUISITE: Creative must be deployed before ad.",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+            )
+
+        if execution.status in (ExternalExecutionStatus.ACTIVATED.value, ExternalExecutionStatus.DEPLOYED.value):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"Execution already in live/activated state: {execution.status}",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+                creative_id=execution.creative_id,
+            )
+
+        # Prerequisite: Tier 2 (PARTIAL_CREATIVE) must have been completed.
+        if execution.status not in (
+            ExternalExecutionStatus.PARTIAL_CREATIVE.value,
+            ExternalExecutionStatus.DEPLOYED_DORMANT.value,
+        ):
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"INVALID_PREREQUISITE_STATE: Execution in '{execution.status}' status; Tier 2 (PARTIAL_CREATIVE) must complete before ad deployment.",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+                creative_id=execution.creative_id,
+            )
+
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=spec.ad_account_id)
+
+        # Proactive Meta Access Token Expiry Validation (covers 48h flight + 24h buffer = 72h)
+        token_insp = adapter.inspect_token(flight_duration_hours=48.0, safety_buffer_hours=24.0)
+        if token_insp.status != TokenStatus.VALID:
+            return RecoveryDormantResult(
+                success=False,
+                blocked=True,
+                reason=f"TOKEN_PREFLIGHT_FAILED: {token_insp.status.value} - {_sanitize_error(token_insp.rejection_reason or '')}",
+                experiment_id=experiment_id,
+                execution=execution,
+                adset_id=execution.adset_id,
+                creative_id=execution.creative_id,
+            )
 
         # Ad Tier
         if not execution.ad_id:
@@ -1055,6 +1564,17 @@ class ExecutionDispatchService:
                 creative_id=execution.creative_id,  # type: ignore[arg-type]
             )
             if ad_lookup.status == ReconciliationStatus.FOUND_EXACT:
+                ad_status = (ad_lookup.details or {}).get("status")
+                if ad_status and str(ad_status).upper() != "PAUSED":
+                    return RecoveryDormantResult(
+                        success=False,
+                        blocked=True,
+                        reason=f"UNEXPECTED_RESOURCE_STATUS: Existing ad status is '{ad_status}', expected 'PAUSED'.",
+                        experiment_id=experiment_id,
+                        execution=execution,
+                        adset_id=execution.adset_id,
+                        creative_id=execution.creative_id,
+                    )
                 execution.ad_id = ad_lookup.resource_id
                 exec_repo.record_event(
                     ExternalExecutionEvent(
@@ -1068,23 +1588,83 @@ class ExecutionDispatchService:
                 )
             elif ad_lookup.status == ReconciliationStatus.NOT_FOUND:
                 try:
-                    ad_id = adapter.create_ad(
-                        name=ad_name,
-                        adset_id=execution.adset_id,  # type: ignore[arg-type]
-                        creative_id=execution.creative_id,  # type: ignore[arg-type]
-                        status="PAUSED",
-                        ad_account_id=spec.ad_account_id,
-                    )
-                    execution.ad_id = ad_id
-                    exec_repo.record_event(
-                        ExternalExecutionEvent(
-                            execution_id=execution.id,
-                            event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
-                            tier="ad",
-                            old_resource_id=None,
-                            new_resource_id=ad_id,
-                            reason="Created ad in PAUSED status for policy review",
-                        )
+                    with claim_deployment_tier(session, experiment_id, "ad"):
+                        # Double-check: refresh execution and lookup within claim
+                        session.expire_all()
+                        execution = exec_repo.get_by_experiment_id(experiment_id)
+                        if execution and execution.ad_id:
+                            pass  # Already created/adopted
+                        else:
+                            ad_lookup_dc = adapter.lookup_ad(
+                                adset_id=execution.adset_id,  # type: ignore[arg-type]
+                                ad_name=ad_name,
+                                creative_id=execution.creative_id,  # type: ignore[arg-type]
+                            )
+                            if ad_lookup_dc.status == ReconciliationStatus.FOUND_EXACT:
+                                ad_status = (ad_lookup_dc.details or {}).get("status")
+                                if ad_status and str(ad_status).upper() != "PAUSED":
+                                    return RecoveryDormantResult(
+                                        success=False,
+                                        blocked=True,
+                                        reason=f"UNEXPECTED_RESOURCE_STATUS: Existing ad status is '{ad_status}', expected 'PAUSED'.",
+                                        experiment_id=experiment_id,
+                                        execution=execution,
+                                        adset_id=execution.adset_id,
+                                        creative_id=execution.creative_id,
+                                    )
+                                execution.ad_id = ad_lookup_dc.resource_id
+                                exec_repo.record_event(
+                                    ExternalExecutionEvent(
+                                        execution_id=execution.id,
+                                        event_type=ExternalExecutionEventType.RESOURCE_ADOPTED.value,
+                                        tier="ad",
+                                        old_resource_id=None,
+                                        new_resource_id=execution.ad_id,
+                                        reason="Adopted existing ad",
+                                    )
+                                )
+                            elif ad_lookup_dc.status == ReconciliationStatus.NOT_FOUND:
+                                ad_id = adapter.create_ad(
+                                    name=ad_name,
+                                    adset_id=execution.adset_id,  # type: ignore[arg-type]
+                                    creative_id=execution.creative_id,  # type: ignore[arg-type]
+                                    status="PAUSED",
+                                    ad_account_id=spec.ad_account_id,
+                                )
+                                execution.ad_id = ad_id
+                                exec_repo.record_event(
+                                    ExternalExecutionEvent(
+                                        execution_id=execution.id,
+                                        event_type=ExternalExecutionEventType.RESOURCE_CREATED.value,
+                                        tier="ad",
+                                        old_resource_id=None,
+                                        new_resource_id=ad_id,
+                                        reason="Created ad in PAUSED status for policy review",
+                                    )
+                                )
+                            else:
+                                return RecoveryDormantResult(
+                                    success=False,
+                                    blocked=True,
+                                    reason=f"Ambiguous ad lookup: {ad_lookup_dc.error_message}",
+                                    experiment_id=experiment_id,
+                                    execution=execution,
+                                    adset_id=execution.adset_id,
+                                    creative_id=execution.creative_id,
+                                )
+                        # Persist ad ID and state immediately within claim before releasing lock
+                        execution.status = ExternalExecutionStatus.DEPLOYED_DORMANT
+                        execution.last_error = None
+                        execution = exec_repo.save(execution)
+                except ConcurrentDeploymentError as cde:
+                    return RecoveryDormantResult(
+                        success=False,
+                        blocked=True,
+                        reason=str(cde),
+                        experiment_id=experiment_id,
+                        execution=execution,
+                        adset_id=execution.adset_id,
+                        creative_id=execution.creative_id,
                     )
                 except Exception as e:
                     execution.status = ExternalExecutionStatus.FAILED
@@ -1110,9 +1690,9 @@ class ExecutionDispatchService:
                     creative_id=execution.creative_id,
                 )
 
-            execution.status = ExternalExecutionStatus.DEPLOYED_DORMANT
-            execution.last_error = None
-            execution = exec_repo.save(execution)
+        execution.status = ExternalExecutionStatus.DEPLOYED_DORMANT
+        execution.last_error = None
+        execution = exec_repo.save(execution)
 
         return RecoveryDormantResult(
             success=True,
@@ -1122,6 +1702,67 @@ class ExecutionDispatchService:
             creative_id=execution.creative_id,
             ad_id=execution.ad_id,
         )
+
+    @classmethod
+    def deploy_recovery_dormant(
+        cls,
+        session: Session,
+        experiment_id: UUID,
+        spec: MetaExecutionSpecification,
+        adapter: MetaMarketingApiAdapter | None = None,
+        safe_mode: bool | None = None,
+        explicit_auth: bool = False,
+        version: int = 2,
+        auto_commit: bool = True,
+    ) -> RecoveryDormantResult:
+        """Phase 1: Deploy dormant replacement ad set, creative, and ad under existing campaign.
+
+        Composes the three independent deployment tiers:
+        1. deploy_recovery_adset_dormant()
+        2. deploy_recovery_creative_dormant()
+        3. deploy_recovery_ad_dormant()
+        """
+        if adapter is None:
+            adapter = MetaMarketingApiAdapter(ad_account_id=spec.ad_account_id)
+
+        # Tier 1: Ad Set
+        adset_res = cls.deploy_recovery_adset_dormant(
+            session=session,
+            experiment_id=experiment_id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=safe_mode,
+            explicit_auth=explicit_auth,
+            version=version,
+            auto_commit=auto_commit,
+        )
+        if not adset_res.success:
+            return adset_res
+
+        # Tier 2: Creative
+        creative_res = cls.deploy_recovery_creative_dormant(
+            session=session,
+            experiment_id=experiment_id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=safe_mode,
+            explicit_auth=explicit_auth,
+            auto_commit=auto_commit,
+        )
+        if not creative_res.success:
+            return creative_res
+
+        # Tier 3: Ad
+        ad_res = cls.deploy_recovery_ad_dormant(
+            session=session,
+            experiment_id=experiment_id,
+            spec=spec,
+            adapter=adapter,
+            safe_mode=safe_mode,
+            explicit_auth=explicit_auth,
+            auto_commit=auto_commit,
+        )
+        return ad_res
 
     @classmethod
     def verify_readiness(
@@ -2270,6 +2911,12 @@ class MetaExperimentDispatchService:
         9. Resources created sequentially in PAUSED status with immediate persistence.
         10. On full deployment, handoff to ExperimentExecutionService.start() transitions APPROVED -> RUNNING.
         """
+        # HARD-BLOCK: Legacy monolithic gateway is permanently deprecated and disabled.
+        raise DeprecatedGatewayError(
+            "LEGACY_DISPATCH_DEPRECATED: MetaExperimentDispatchService._dispatch_from_gateway "
+            "is deprecated and permanently blocked. Use granular recovery deployment tiers."
+        )
+
         # 0. Context validation
         if not isinstance(gateway_context, _GatewayInvocationContext):
             return DispatchResult(
@@ -2678,6 +3325,17 @@ class MetaExperimentDispatchService:
                 creative_id=execution.creative_id,  # type: ignore[arg-type]
             )
             if ad_lookup.status == ReconciliationStatus.FOUND_EXACT:
+                ad_status = (ad_lookup.details or {}).get("status")
+                if ad_status and str(ad_status).upper() != "PAUSED":
+                    return RecoveryDormantResult(
+                        success=False,
+                        blocked=True,
+                        reason=f"UNEXPECTED_RESOURCE_STATUS: Existing ad status is '{ad_status}', expected 'PAUSED'.",
+                        experiment_id=experiment_id,
+                        execution=execution,
+                        adset_id=execution.adset_id,
+                        creative_id=execution.creative_id,
+                    )
                 execution.ad_id = ad_lookup.resource_id
                 execution.status = ExternalExecutionStatus.DEPLOYED
                 execution.last_error = None

@@ -1,6 +1,7 @@
 """Experiment Execution Foundation module."""
 
 from venturebot.execution.dispatch import (
+    DeprecatedGatewayError,
     DispatchResult,
     EmergencyStopResult,
     ExecutionAction,
@@ -34,6 +35,7 @@ from venturebot.execution.models import ExecutionResult
 from venturebot.execution.service import ExperimentExecutionService
 
 __all__ = [
+    "DeprecatedGatewayError",
     "DispatchResult",
     "EmergencyStopResult",
     "ExecutionAction",

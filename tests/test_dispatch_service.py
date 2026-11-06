@@ -21,6 +21,7 @@ from venturebot.database.repositories.experiment import ExperimentRepository
 from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.database.repositories.opportunity import OpportunityRepository
 from venturebot.execution.dispatch import (
+    DeprecatedGatewayError,
     DispatchResult,
     EmergencyStopResult,
     ExecutionDispatchService,
@@ -413,52 +414,51 @@ def test_repo_get_events_by_resource_id(session: Session, approved_experiment: E
 
 # ── B. Dispatch Validation Tests ─────────────────────────────────────────────
 
+def _assert_dispatch_meta_deprecated(
+    session: Session,
+    experiment_id: UUID,
+    spec: MetaExecutionSpecification,
+    adapter: MetaMarketingApiAdapter | None = None,
+) -> None:
+    """Verify that calling deprecated _dispatch_meta raises DeprecatedGatewayError."""
+    with pytest.raises(DeprecatedGatewayError, match="LEGACY_DISPATCH_DEPRECATED"):
+        _dispatch_meta(session, experiment_id, spec, adapter=adapter)
+
+
 def test_dispatch_fails_if_experiment_not_found(session: Session, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects non-existent experiment."""
+    """Dispatch rejects non-existent experiment with DeprecatedGatewayError."""
     fake_id = uuid4()
-    res = _dispatch_meta(session, fake_id, valid_spec)
-    assert res.is_successful is False
-    assert "does not exist" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, fake_id, valid_spec)
 
 
 def test_dispatch_fails_if_experiment_not_approved(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects experiments that are not in APPROVED status."""
+    """Dispatch rejects experiments in non-approved status with DeprecatedGatewayError."""
     exp_repo = ExperimentRepository(session)
     exp_repo.update_status(approved_experiment.id, ExperimentStatus.DRAFT)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec)
-    assert res.is_successful is False
-    assert "Only experiments in 'approved' status can be dispatched" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec)
 
 
 def test_dispatch_fails_if_authorization_not_explicit(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects if explicit operator authorization is False."""
+    """Dispatch rejects non-explicit authorization with DeprecatedGatewayError."""
     valid_spec.explicit_dispatch_authorized = False
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec)
-    assert res.is_successful is False
-    assert "Explicit operator dispatch authorization is required" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec)
 
 
 def test_dispatch_fails_if_spec_experiment_id_mismatch(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects if specification target does not match target experiment."""
+    """Dispatch rejects specification mismatch with DeprecatedGatewayError."""
     other_id = uuid4()
     valid_spec.experiment_id = other_id
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec)
-    assert res.is_successful is False
-    assert "does not match target experiment" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec)
 
 
 def test_dispatch_fails_if_budget_exceeds_limits(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects if requested authorized_budget exceeds remaining allocation."""
-    # Attempting ₹150 budget when only ₹100 was approved
+    """Dispatch rejects excessive budget with DeprecatedGatewayError."""
     valid_spec.authorized_budget = Decimal("150.00")
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec)
-    assert res.is_successful is False
-    assert "exceeds remaining allocated budget" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec)
 
 
 def test_dispatch_fails_if_ad_account_inactive(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects if target Meta ad account is disabled or inactive."""
+    """Dispatch rejects inactive account with DeprecatedGatewayError."""
     transport = make_mock_transport({
         "/act_1985595022114520?fields=": {
             "id": "act_1985595022114520",
@@ -468,13 +468,11 @@ def test_dispatch_fails_if_ad_account_inactive(session: Session, approved_experi
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert "is not active" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 def test_dispatch_fails_if_ad_account_currency_mismatch(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects if target Meta ad account currency is not INR."""
+    """Dispatch rejects non-INR currency with DeprecatedGatewayError."""
     transport = make_mock_transport({
         "/act_1985595022114520?fields=": {
             "id": "act_1985595022114520",
@@ -484,13 +482,11 @@ def test_dispatch_fails_if_ad_account_currency_mismatch(session: Session, approv
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert "expected 'INR'" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 def test_dispatch_fails_if_already_fully_deployed(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Dispatch rejects if experiment already has a DEPLOYED external execution record."""
+    """Dispatch rejects duplicate deployment with DeprecatedGatewayError."""
     exec_repo = ExternalExecutionRepository(session)
     exec_repo.create(
         ExternalExecution(
@@ -510,15 +506,13 @@ def test_dispatch_fails_if_already_fully_deployed(session: Session, approved_exp
         access_token=SAMPLE_TOKEN,
         transport=make_mock_transport(),
     )
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert "already fully deployed" in (res.rejection_reason or "")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 # ── C. Successful Dispatch Tests ─────────────────────────────────────────────
 
 def test_successful_dispatch_end_to_end(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Test full sequential creation with mock transport; verifies state and zero financial impact."""
+    """Verify legacy dispatch is blocked and causes no state changes or financial impact."""
     mock_transport = make_mock_transport()
     adapter = MetaMarketingApiAdapter(
         ad_account_id=SAMPLE_ACCOUNT_ID,
@@ -530,24 +524,7 @@ def test_successful_dispatch_end_to_end(session: Session, approved_experiment: E
     initial_summary = cap_repo.get_financial_summary()
     initial_tx_count = len(cap_repo.get_transaction_history())
 
-    res = _dispatch_meta(
-        session,
-        approved_experiment.id,
-        valid_spec,
-        adapter=adapter,
-    )
-
-    assert res.is_successful is True
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.DEPLOYED
-    assert res.execution.campaign_id == "camp_101"
-    assert res.execution.adset_id == "adset_202"
-    assert res.execution.creative_id == "creative_303"
-    assert res.execution.ad_id == "ad_404"
-
-    # Internal lifecycle transitioned to RUNNING
-    assert res.experiment is not None
-    assert res.experiment.status == ExperimentStatus.RUNNING
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
     # Verify zero financial side-effects
     final_summary = cap_repo.get_financial_summary()
@@ -557,132 +534,65 @@ def test_successful_dispatch_end_to_end(session: Session, approved_experiment: E
     assert final_summary.total_cost == initial_summary.total_cost
     assert final_summary.total_cost == Decimal("0.00")
 
-    # Verify all write requests sent status="PAUSED"
-    for req in mock_transport.requests:  # type: ignore[attr-defined]
-        if req.data:
-            try:
-                body_json = json.loads(req.data.decode("utf-8"))
-                if "status" in body_json:
-                    assert body_json["status"] == "PAUSED"
-            except Exception:
-                pass
+    # Verify zero write requests made
+    post_requests = [
+        r for r in mock_transport.requests
+        if getattr(r, "get_method", lambda: "GET")() == "POST"
+    ]
+    assert len(post_requests) == 0
 
 
 # ── D. Partial Failure Tests ─────────────────────────────────────────────────
 
 def test_partial_failure_campaign_creation(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """If campaign creation fails, status becomes FAILED and experiment remains APPROVED."""
+    """Legacy dispatch is hard-blocked before campaign creation."""
     transport = make_mock_transport({
         "/campaigns": MetaApiError("Meta error: Invalid bid objective"),
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert "Invalid bid objective" in (res.execution.last_error or "")
-
-    # Experiment did NOT transition to RUNNING
-    exp_repo = ExperimentRepository(session)
-    exp = exp_repo.get(approved_experiment.id)
-    assert exp is not None
-    assert exp.status == ExperimentStatus.APPROVED
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 def test_partial_failure_adset_creation_preserves_campaign(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """If ad set creation fails, campaign_id is preserved, status is FAILED, experiment remains APPROVED."""
+    """Legacy dispatch is hard-blocked before adset creation."""
     transport = make_mock_transport({
         "/adsets": MetaApiError("Meta error: Budget too low for targeting"),
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert res.execution is not None
-    assert res.execution.campaign_id == "camp_101"
-    assert res.execution.adset_id is None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert "Budget too low" in (res.execution.last_error or "")
-
-    # Experiment remains APPROVED
-    exp = ExperimentRepository(session).get(approved_experiment.id)
-    assert exp is not None
-    assert exp.status == ExperimentStatus.APPROVED
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 def test_partial_failure_creative_creation_preserves_adset(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """If creative creation fails, campaign and adset remain preserved."""
+    """Legacy dispatch is hard-blocked before creative creation."""
     transport = make_mock_transport({
         "/adcreatives": MetaApiError("Meta error: Link URL rejected"),
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert res.execution is not None
-    assert res.execution.campaign_id == "camp_101"
-    assert res.execution.adset_id == "adset_202"
-    assert res.execution.creative_id is None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 def test_continuation_after_partial_failure_reuses_existing_ids(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Verify that retrying after partial failure resumes from the missing tier without recreating existing tiers."""
-    # First dispatch fails on ad creation (tiers 1-3 succeed)
-    fail_ad_transport = make_mock_transport({
-        "/ads": MetaApiError("Meta error: Transient 500 error"),
-    })
-    adapter_fail = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=fail_ad_transport)
-    res1 = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter_fail)
-    assert res1.is_successful is False
-    assert res1.execution is not None
-    assert res1.execution.campaign_id == "camp_101"
-    assert res1.execution.adset_id == "adset_202"
-    assert res1.execution.creative_id == "creative_303"
-    assert res1.execution.ad_id is None
-    assert res1.execution.status == ExternalExecutionStatus.FAILED
-
-    # Second dispatch with working transport resumes and completes
+    """Legacy dispatch is hard-blocked on retries."""
     success_transport = make_mock_transport()
     adapter_success = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=success_transport)
-    res2 = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter_success)
-    assert res2.is_successful is True
-    assert res2.execution is not None
-    assert res2.execution.campaign_id == "camp_101"  # Reused!
-    assert res2.execution.adset_id == "adset_202"    # Reused!
-    assert res2.execution.creative_id == "creative_303" # Reused!
-    assert res2.execution.ad_id == "ad_404"          # Newly created
-    assert res2.execution.status == ExternalExecutionStatus.DEPLOYED
-    assert res2.experiment is not None
-    assert res2.experiment.status == ExperimentStatus.RUNNING
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter_success)
 
 
 # ── E. Timeout Handling Tests ────────────────────────────────────────────────
 
 def test_dispatch_timeout_handling(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Verify timeout marks execution TIMEOUT and does not leave internal experiment RUNNING."""
+    """Legacy dispatch is hard-blocked before timeout occurs."""
     transport = make_mock_transport({
         "/campaigns": MetaApiTimeoutError("Network socket timed out after 10.0s"),
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.TIMEOUT
-    assert "timed out" in (res.execution.last_error or "")
-
-    # Experiment remains APPROVED
-    exp = ExperimentRepository(session).get(approved_experiment.id)
-    assert exp is not None
-    assert exp.status == ExperimentStatus.APPROVED
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 # ── F. Remote Duplicate Campaign Tests ───────────────────────────────────────
 
 def test_remote_duplicate_campaign_ambiguous_fails(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Verify that if multiple matching campaigns exist on Meta (AMBIGUOUS), creation is aborted."""
+    """Legacy dispatch is hard-blocked before duplicate lookup."""
     transport = make_mock_transport({
         "/campaigns?fields=": {
             "data": [
@@ -692,45 +602,43 @@ def test_remote_duplicate_campaign_ambiguous_fails(session: Session, approved_ex
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is False
-    assert "Ambiguous" in (res.rejection_reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 def test_remote_duplicate_campaign_adopted_when_single_exact_match(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
-    """Verify that if exactly one matching campaign already exists on Meta (FOUND_EXACT), it is adopted."""
+    """Legacy dispatch is hard-blocked before duplicate adoption."""
     transport = make_mock_transport({
         "/campaigns?fields=": {
             "data": [{"id": "existing_c_999", "name": f"VB-EXP-{approved_experiment.id}", "status": "PAUSED"}]
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.is_successful is True
-    assert res.execution is not None
-    assert res.execution.campaign_id == "existing_c_999"
-    # Ensure campaign POST was NOT called
-    for req in transport.requests:  # type: ignore[attr-defined]
-        if "/campaigns" in req.full_url and req.get_method() == "POST":
-            pytest.fail("Campaign POST was called despite existing campaign on remote.")
+    _assert_dispatch_meta_deprecated(session, approved_experiment.id, valid_spec, adapter=adapter)
 
 
 # ── G. Emergency Pause / Kill Coordination Tests ─────────────────────────────
 
 def test_emergency_stop_success_pauses_external_and_kills_internal(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
     """Successful external pause coordinates with internal experiment kill."""
-    # First deploy successfully
+    # Seed ExternalExecution directly and transition experiment to RUNNING
+    from venturebot.models import ExternalExecution, ExternalExecutionStatus
+    ExperimentRepository(session).update_status(approved_experiment.id, status=ExperimentStatus.RUNNING)
+    exec_record = ExternalExecution(
+        experiment_id=approved_experiment.id,
+        channel="meta",
+        external_account_id=SAMPLE_ACCOUNT_ID,
+        campaign_id="camp_101",
+        adset_id="adset_202",
+        status=ExternalExecutionStatus.DEPLOYED,
+    )
+    ExternalExecutionRepository(session).create(exec_record)
+    session.commit()
+
     adapter = MetaMarketingApiAdapter(
         ad_account_id=SAMPLE_ACCOUNT_ID,
         access_token=SAMPLE_TOKEN,
         transport=make_mock_transport(),
     )
-    disp_res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert disp_res.is_successful is True
 
     # Now emergency stop
     stop_res = ExecutionDispatchService.emergency_stop(
@@ -750,14 +658,19 @@ def test_emergency_stop_success_pauses_external_and_kills_internal(session: Sess
 
 def test_emergency_stop_pause_failure_blocks_internal_kill(session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification):
     """If external pause fails, internal experiment is NOT marked KILLED and remains RUNNING."""
-    # Deploy successfully
-    adapter = MetaMarketingApiAdapter(
-        ad_account_id=SAMPLE_ACCOUNT_ID,
-        access_token=SAMPLE_TOKEN,
-        transport=make_mock_transport(),
+    # Seed ExternalExecution directly and transition experiment to RUNNING
+    from venturebot.models import ExternalExecution, ExternalExecutionStatus
+    ExperimentRepository(session).update_status(approved_experiment.id, status=ExperimentStatus.RUNNING)
+    exec_record = ExternalExecution(
+        experiment_id=approved_experiment.id,
+        channel="meta",
+        external_account_id=SAMPLE_ACCOUNT_ID,
+        campaign_id="camp_101",
+        adset_id="adset_202",
+        status=ExternalExecutionStatus.DEPLOYED,
     )
-    disp_res = _dispatch_meta(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert disp_res.is_successful is True
+    ExternalExecutionRepository(session).create(exec_record)
+    session.commit()
 
     # Emergency stop with failing pause transport
     failing_adapter = MetaMarketingApiAdapter(

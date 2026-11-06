@@ -47,6 +47,7 @@ from venturebot.database.repositories.experiment import ExperimentRepository
 from venturebot.database.repositories.external_execution import ExternalExecutionRepository
 from venturebot.database.repositories.opportunity import OpportunityRepository
 from venturebot.execution.dispatch import (
+    DeprecatedGatewayError,
     ExecutionAction,
     ExecutionDispatchService,
     ExecutionRequest,
@@ -239,13 +240,57 @@ def _dispatch_via_gateway(
     )
 
 
+def _assert_legacy_dispatch_blocked(
+    session: Session,
+    approved_experiment: Experiment,
+    valid_spec: MetaExecutionSpecification,
+    adapter: MetaMarketingApiAdapter,
+    transport: Any,
+) -> None:
+    """Verify that public dispatch and direct gateway invocation fail closed without Meta mutations."""
+    # 1. Public ExecutionDispatchService.dispatch() fails closed
+    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
+    assert res.success is False
+    assert res.blocked is True
+    assert "LEGACY_DISPATCH_DEPRECATED" in (res.reason or "")
+
+    # 2. No adapter mutation methods (POST) were called
+    for req in transport.requests:
+        assert req.get_method() != "POST", f"POST called: {req.full_url}"
+
+    # 3. Direct invocation of deprecated gateway immediately raises DeprecatedGatewayError
+    ctx = _GatewayInvocationContext(
+        experiment_id=approved_experiment.id,
+        proposed_budget=valid_spec.authorized_budget,
+        channel="meta",
+    )
+    with pytest.raises(DeprecatedGatewayError, match="LEGACY_DISPATCH_DEPRECATED"):
+        MetaExperimentDispatchService._dispatch_from_gateway(
+            session=session,
+            experiment_id=approved_experiment.id,
+            spec=valid_spec,
+            adapter=adapter,
+            safe_mode=False,
+            gateway_context=ctx,
+        )
+
+    # 4. Still zero POST requests after direct invocation attempt
+    for req in transport.requests:
+        assert req.get_method() != "POST", f"POST called: {req.full_url}"
+
+    # 5. Experiment remains in APPROVED status, never transitions to RUNNING
+    exp_db = ExperimentRepository(session).get(approved_experiment.id)
+    assert exp_db is not None
+    assert exp_db.status == ExperimentStatus.APPROVED
+
+
 # ── 1-4: Campaign Reconciliation Tests ───────────────────────────────────────
 
 
 def test_1_campaign_found_exact_adopts_and_no_post(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """1. Campaign FOUND_EXACT → adopt ID, no campaign POST."""
+    """1. Campaign FOUND_EXACT → legacy dispatch fails closed, no campaign POST."""
     c_name = deterministic_campaign_name(approved_experiment.id)
     transport = make_reconciliation_transport({
         "/campaigns?fields=": {
@@ -253,38 +298,18 @@ def test_1_campaign_found_exact_adopts_and_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.campaign_id == "camp_existing_exact_1"
-    # Verify no POST to /campaigns
-    for req in transport.requests:  # type: ignore[attr-defined]
-        if "/campaigns" in req.full_url and req.get_method() == "POST":
-            pytest.fail("Campaign POST was called when campaign was FOUND_EXACT.")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_2_campaign_not_found_creates_campaign(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """2. Campaign NOT_FOUND → POST allowed, newly created campaign ID adopted."""
+    """2. Campaign NOT_FOUND → legacy dispatch fails closed, no campaign POST."""
     transport = make_reconciliation_transport({
         "/campaigns?fields=": {"data": []}
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.campaign_id == "mock_camp_new"
-    # Verify POST to /campaigns was called exactly once
-    post_count = sum(
-        1 for req in transport.requests  # type: ignore[attr-defined]
-        if "/campaigns" in req.full_url and req.get_method() == "POST"
-    )
-    assert post_count == 1
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_3_campaign_ambiguous_stops_no_post(
@@ -301,18 +326,7 @@ def test_3_campaign_ambiguous_stops_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "Ambiguous" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert res.execution.campaign_id is None
-    # Verify no POST of any kind was executed
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert req.get_method() != "POST", f"POST called: {req.full_url}"
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_4_campaign_unknown_stops_no_post(
@@ -323,17 +337,7 @@ def test_4_campaign_unknown_stops_no_post(
         "/campaigns?fields=": TimeoutError("Meta Graph API connection timed out.")
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "UNKNOWN" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.TIMEOUT
-    # Zero POST requests
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert req.get_method() != "POST"
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 # ── 5-8: Ad Set Reconciliation Tests ─────────────────────────────────────────
@@ -342,7 +346,7 @@ def test_4_campaign_unknown_stops_no_post(
 def test_5_adset_found_exact_adopts_and_no_post(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """5. Ad Set FOUND_EXACT → adopt ID, no adset POST."""
+    """5. Ad Set FOUND_EXACT → legacy dispatch fails closed, no adset POST."""
     as_name = deterministic_adset_name(approved_experiment.id)
     transport = make_reconciliation_transport({
         "/adsets?fields=": {
@@ -357,37 +361,18 @@ def test_5_adset_found_exact_adopts_and_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.adset_id == "adset_existing_exact_1"
-    # Ensure adset POST was not executed
-    for req in transport.requests:  # type: ignore[attr-defined]
-        if "/adsets" in req.full_url and req.get_method() == "POST":
-            pytest.fail("Ad Set POST was called when ad set was FOUND_EXACT.")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_6_adset_not_found_creates_adset(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """6. Ad Set NOT_FOUND → POST allowed, newly created ad set adopted."""
+    """6. Ad Set NOT_FOUND → legacy dispatch fails closed, no ad set created."""
     transport = make_reconciliation_transport({
         "/adsets?fields=": {"data": []}
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.adset_id == "mock_adset_new"
-    adset_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/adsets" in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(adset_posts) == 1
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_7_adset_ambiguous_stops_no_post(
@@ -404,18 +389,7 @@ def test_7_adset_ambiguous_stops_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "Ambiguous" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert res.execution.adset_id is None
-    # Ad set POST must not be called
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert not ("/adsets" in req.full_url and req.get_method() == "POST")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_8_adset_unknown_stops_no_post(
@@ -426,18 +400,7 @@ def test_8_adset_unknown_stops_no_post(
         "/adsets?fields=": MetaApiError("HTTP 500 Internal Server Error from Meta")
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "UNKNOWN" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert res.execution.adset_id is None
-    # No ad set POST
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert not ("/adsets" in req.full_url and req.get_method() == "POST")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 # ── 9-12: Creative Reconciliation Tests ──────────────────────────────────────
@@ -446,7 +409,7 @@ def test_8_adset_unknown_stops_no_post(
 def test_9_creative_found_exact_adopts_and_no_post(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """9. Creative FOUND_EXACT → adopt ID, no creative POST."""
+    """9. Creative FOUND_EXACT → legacy dispatch fails closed, no creative POST."""
     cr_name = deterministic_creative_name(approved_experiment.id)
     transport = make_reconciliation_transport({
         "/adcreatives?fields=": {
@@ -466,37 +429,18 @@ def test_9_creative_found_exact_adopts_and_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.creative_id == "creative_existing_exact_1"
-    # Ensure creative POST was not called
-    for req in transport.requests:  # type: ignore[attr-defined]
-        if "/adcreatives" in req.full_url and req.get_method() == "POST":
-            pytest.fail("Creative POST was called when creative was FOUND_EXACT.")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_10_creative_not_found_creates_creative(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """10. Creative NOT_FOUND → POST allowed, newly created creative adopted."""
+    """10. Creative NOT_FOUND → legacy dispatch fails closed, no creative POST."""
     transport = make_reconciliation_transport({
         "/adcreatives?fields=": {"data": []}
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.creative_id == "mock_creative_new"
-    cr_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/adcreatives" in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(cr_posts) == 1
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_11_creative_ambiguous_stops_no_post(
@@ -520,18 +464,7 @@ def test_11_creative_ambiguous_stops_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "Ambiguous" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert res.execution.creative_id is None
-    # No creative POST
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert not ("/adcreatives" in req.full_url and req.get_method() == "POST")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_12_creative_unknown_stops_no_post(
@@ -542,17 +475,7 @@ def test_12_creative_unknown_stops_no_post(
         "/adcreatives?fields=": MetaApiTimeoutError("Creative query timed out")
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "UNKNOWN" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.TIMEOUT
-    assert res.execution.creative_id is None
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert not ("/adcreatives" in req.full_url and req.get_method() == "POST")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 # ── 13-16: Ad Reconciliation Tests ──────────────────────────────────────────
@@ -561,7 +484,7 @@ def test_12_creative_unknown_stops_no_post(
 def test_13_ad_found_exact_adopts_and_no_post(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """13. Ad FOUND_EXACT → adopt ID, no ad POST."""
+    """13. Ad FOUND_EXACT → legacy dispatch fails closed, no ad POST."""
     ad_name = deterministic_ad_name(approved_experiment.id)
     transport = make_reconciliation_transport({
         "/ads?fields=": {
@@ -575,37 +498,18 @@ def test_13_ad_found_exact_adopts_and_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.ad_id == "ad_existing_exact_1"
-    # Ensure ad POST was not called
-    for req in transport.requests:  # type: ignore[attr-defined]
-        if "/ads" in req.full_url and "/adsets" not in req.full_url and req.get_method() == "POST":
-            pytest.fail("Ad POST was called when ad was FOUND_EXACT.")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_14_ad_not_found_creates_ad(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """14. Ad NOT_FOUND → POST allowed, newly created ad adopted."""
+    """14. Ad NOT_FOUND → legacy dispatch fails closed, no ad POST."""
     transport = make_reconciliation_transport({
         "/ads?fields=": {"data": []}
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.ad_id == "mock_ad_new"
-    ad_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/ads" in req.full_url and "/adsets" not in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(ad_posts) == 1
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_15_ad_ambiguous_stops_no_post(
@@ -622,18 +526,7 @@ def test_15_ad_ambiguous_stops_no_post(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "Ambiguous" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert res.execution.ad_id is None
-    # No ad POST
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert not ("/ads" in req.full_url and "/adsets" not in req.full_url and req.get_method() == "POST")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_16_ad_unknown_stops_no_post(
@@ -644,17 +537,7 @@ def test_16_ad_unknown_stops_no_post(
         "/ads?fields=": "NOT_VALID_JSON_RESPONSE"
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is False
-    assert res.blocked is True
-    assert "UNKNOWN" in (res.reason or "")
-    assert res.execution is not None
-    assert res.execution.status == ExternalExecutionStatus.FAILED
-    assert res.execution.ad_id is None
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert not ("/ads" in req.full_url and "/adsets" not in req.full_url and req.get_method() == "POST")
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 # ── 17-20: Lost Response Recovery Tests ──────────────────────────────────────
@@ -663,48 +546,21 @@ def test_16_ad_unknown_stops_no_post(
 def test_17_lost_campaign_response_recovery(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """17. Campaign POST was executed remotely, but response was lost (local execution record has no campaign_id).
-
-    Next attempt:
-    - performs campaign lookup
-    - finds exact matching remote campaign
-    - adopts it without issuing a second campaign POST!
-    """
+    """17. Campaign POST was executed remotely, response lost → legacy dispatch fails closed, no duplicate POST."""
     c_name = deterministic_campaign_name(approved_experiment.id)
-
-    # Remote has the campaign from the previous lost-response POST
     transport = make_reconciliation_transport({
         "/campaigns?fields=": {
             "data": [{"id": "camp_from_lost_response", "name": c_name, "status": "PAUSED"}]
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.campaign_id == "camp_from_lost_response"
-
-    # CRITICAL: zero campaign POSTs
-    campaign_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/campaigns" in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(campaign_posts) == 0
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_18_lost_adset_response_recovery(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """18. Ad Set POST was executed remotely, but response was lost (execution has campaign_id, but no adset_id).
-
-    Next attempt:
-    - reuses persisted campaign_id
-    - reconciles ad set
-    - finds exact matching remote ad set
-    - adopts it without issuing a second ad set POST!
-    """
+    """18. Ad Set POST was executed remotely, response lost → legacy dispatch fails closed, no duplicate POST."""
     as_name = deterministic_adset_name(approved_experiment.id)
     exec_repo = ExternalExecutionRepository(session)
     exec_repo.create(
@@ -730,29 +586,13 @@ def test_18_lost_adset_response_recovery(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.campaign_id == "camp_persisted_prior"
-    assert res.execution.adset_id == "adset_from_lost_response"
-
-    # CRITICAL: zero ad set POSTs
-    adset_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/adsets" in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(adset_posts) == 0
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_19_lost_creative_response_recovery(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """19. Creative POST was executed remotely, response lost.
-
-    Next attempt reconciles creative, finds exact match, adopts it without duplicate POST.
-    """
+    """19. Creative POST was executed remotely, response lost → legacy dispatch fails closed, no duplicate POST."""
     cr_name = deterministic_creative_name(approved_experiment.id)
     exec_repo = ExternalExecutionRepository(session)
     exec_repo.create(
@@ -783,27 +623,13 @@ def test_19_lost_creative_response_recovery(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.creative_id == "creative_from_lost_response"
-
-    cr_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/adcreatives" in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(cr_posts) == 0
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_20_lost_ad_response_recovery(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """20. Ad POST was executed remotely, response lost.
-
-    Next attempt reconciles ad, finds exact match under ad set and creative, adopts it, reaches DEPLOYED.
-    """
+    """20. Ad POST was executed remotely, response lost → legacy dispatch fails closed, no duplicate POST."""
     ad_name = deterministic_ad_name(approved_experiment.id)
     exec_repo = ExternalExecutionRepository(session)
     exec_repo.create(
@@ -831,19 +657,7 @@ def test_20_lost_ad_response_recovery(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.ad_id == "ad_from_lost_response"
-    assert res.execution.status == ExternalExecutionStatus.DEPLOYED
-
-    ad_posts = [
-        req for req in transport.requests  # type: ignore[attr-defined]
-        if "/ads" in req.full_url and "/adsets" not in req.full_url and req.get_method() == "POST"
-    ]
-    assert len(ad_posts) == 0
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 # ── 21-25: Integrity, Invariant, and Guardrail Tests ─────────────────────────
@@ -852,7 +666,7 @@ def test_20_lost_ad_response_recovery(
 def test_21_parent_mismatch_is_rejected(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """21. Parent mismatch is rejected: adset with same name but belonging to another campaign is NOT adopted."""
+    """21. Parent mismatch is rejected: legacy dispatch fails closed, zero writes."""
     as_name = deterministic_adset_name(approved_experiment.id)
     transport = make_reconciliation_transport({
         "/adsets?fields=": {
@@ -866,20 +680,13 @@ def test_21_parent_mismatch_is_rejected(
         }
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
-
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-
-    # Lookup ignores the wrong parent match, treats as NOT_FOUND under our campaign, and creates a fresh adset
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.adset_id == "mock_adset_new"
-    assert res.execution.adset_id != "adset_from_wrong_campaign"
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
 
 def test_22_existing_persisted_ids_are_reused(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """22. Existing persisted IDs are reused without querying remote lookup."""
+    """22. Existing persisted records remain intact and readable; legacy dispatch fails closed."""
     exec_repo = ExternalExecutionRepository(session)
     exec_repo.create(
         ExternalExecution(
@@ -896,17 +703,14 @@ def test_22_existing_persisted_ids_are_reused(
     transport = make_reconciliation_transport()
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
 
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
-    assert res.success is True
-    assert res.execution is not None
-    assert res.execution.campaign_id == "camp_already_known"
-    assert res.execution.adset_id == "adset_already_known"
-
-    # Campaign and ad set lookup GET requests were NOT made
-    for req in transport.requests:  # type: ignore[attr-defined]
-        assert "/campaigns?fields=" not in req.full_url
-        assert "/adsets?fields=" not in req.full_url
+    # Historical persisted execution record remains intact and readable
+    persisted = exec_repo.get_by_experiment_id(approved_experiment.id)
+    assert persisted is not None
+    assert persisted.campaign_id == "camp_already_known"
+    assert persisted.adset_id == "adset_already_known"
+    assert persisted.status == ExternalExecutionStatus.PARTIAL_ADSET
 
 
 def test_23_reconciliation_does_not_mutate_capital_transaction(
@@ -921,10 +725,9 @@ def test_23_reconciliation_does_not_mutate_capital_transaction(
     transport = make_reconciliation_transport()
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
 
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
-    assert res.success is True
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
-    # Post-dispatch verification
+    # Post-dispatch verification: capital transactions strictly unmodified
     post_txs = session.query(CapitalTransactionORM).all()
     assert len(post_txs) == initial_count
     post_liquid = CapitalRepository(session).get_current_balance()
@@ -951,34 +754,53 @@ def test_24_safe_mode_still_blocks_before_any_write(
 def test_25_full_deployment_only_reaches_running_after_all_tiers_deployed(
     session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
 ):
-    """25. Internal experiment only transitions to RUNNING after all 5 tiers deploy.
-
-    If an intermediate tier (e.g. ad creation) fails, experiment remains APPROVED, never RUNNING.
-    """
+    """25. Monolithic full deployment is deprecated and blocked; experiment remains APPROVED, never RUNNING."""
     transport = make_reconciliation_transport({
         "/ads?fields=": MetaApiError("Ad creation blocked due to validation failure.")
     })
     adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
 
-    res = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter)
+    _assert_legacy_dispatch_blocked(session, approved_experiment, valid_spec, adapter, transport)
 
-    assert res.success is False
     # Verify experiment in DB is still APPROVED, NOT RUNNING
     exp_db = ExperimentRepository(session).get(approved_experiment.id)
     assert exp_db is not None
     assert exp_db.status == ExperimentStatus.APPROVED
 
-    # Now fix the issue so all tiers deploy
-    transport_success = make_reconciliation_transport()
-    adapter_success = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport_success)
 
-    res_success = _dispatch_via_gateway(session, approved_experiment.id, valid_spec, adapter=adapter_success)
-    assert res_success.success is True
+def test_26_emergency_stop_does_not_invoke_legacy_gateway(
+    session: Session, approved_experiment: Experiment, valid_spec: MetaExecutionSpecification
+):
+    """26. Emergency stop executes fail-closed without invoking the deprecated deployment gateway."""
+    transport = make_reconciliation_transport()
+    adapter = MetaMarketingApiAdapter(ad_account_id=SAMPLE_ACCOUNT_ID, access_token=SAMPLE_TOKEN, transport=transport)
 
-    # Now experiment MUST be RUNNING
-    exp_db_running = ExperimentRepository(session).get(approved_experiment.id)
-    assert exp_db_running is not None
-    assert exp_db_running.status == ExperimentStatus.RUNNING
+    # Seed execution directly without deprecated deployment gateway
+    exec_repo = ExternalExecutionRepository(session, auto_commit=True)
+    exec_repo.create(
+        ExternalExecution(
+            experiment_id=approved_experiment.id,
+            channel="meta",
+            external_account_id=valid_spec.ad_account_id,
+            campaign_id="camp_reconcile_emerg",
+            status=ExternalExecutionStatus.DEPLOYED,
+        )
+    )
+    exp_repo = ExperimentRepository(session, auto_commit=True)
+    exp = exp_repo.get(approved_experiment.id)
+    assert exp is not None
+    exp_repo.update_status(exp.id, status=ExperimentStatus.RUNNING)
+
+    # Now trigger emergency stop
+    stop_res = ExecutionDispatchService.emergency_stop(
+        session=session,
+        experiment_id=approved_experiment.id,
+        reason="Operator test emergency stop.",
+        adapter=adapter,
+    )
+    assert stop_res.is_successful is True
+    assert stop_res.experiment is not None
+    assert stop_res.experiment.status == ExperimentStatus.KILLED
 
 
 # ── Unit Tests: Deterministic Naming Helpers ─────────────────────────────────
