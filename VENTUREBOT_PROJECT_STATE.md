@@ -56,13 +56,70 @@ Systematically discover, test, measure, improve, and scale legitimate revenue op
 
 ## Current Version
 
-V1.63 — Independent Code Audit & Defect Fixes (Step 90.12.15)
+V1.66 — Trusted Authorization and True Concurrency Audit (Step 90.15.4)
 
 ---
 
 ## Current Status
 
-Step 90.12.15 Complete — Independent Full Code Audit & Defect Fixes Verified (100% Hermetic Test Verification: 634 passing tests)
+Step 90.15.4 Complete — Trusted Authorization and True Concurrency Audit Verified (100% Hermetic Test Verification: 669 passing tests)
+
+- **Step 90.15.4 Trusted Authorization and True Concurrency Audit Summary:**
+  - **Part A: Trusted Operator Authorization Boundary Resolved:**
+    - Proved that VentureBot does NOT possess a cryptographic signature verification system, OAuth identity provider, or RBAC subsystem.
+    - Verified that `explicit_auth: bool` is an API flag, not an identity mechanism.
+    - Determined that recovery version 2 (`-ADSET-v2`) is permitted only as an operational assumption based on human instruction for Option B pilot recovery, but could be called by any arbitrary local caller if SAFE_MODE were lowered.
+    - Confirmed that recovery versions above 2 fail closed under Rules A.7 & A.8 (`UNTRUSTED_OPERATOR_AUTHENTICATION`).
+    - **Conclusion:** Live Meta mutations MUST remain blocked under `VENTUREBOT_SAFE_MODE=true`.
+  - **Part B: True Concurrent Creation Safety & Mutual Exclusion:**
+    - Confirmed that the Meta Marketing API does NOT support atomic idempotency keys or unique name constraints for ad sets, creatives, or ads. Concurrent POST requests with identical names will create multiple distinct remote resources on Meta.
+    - Implemented a robust two-layer reservation and concurrency control mechanism (`claim_deployment_tier`):
+      1. In-process mutex via `_TIER_THREAD_LOCKS` keyed on `(experiment_id, tier)`.
+      2. Cross-process database claim via `DeploymentClaimORM` table with unique constraint `uq_deployment_claims_exp_tier` on `(experiment_id, tier)`.
+      3. Automatic TTL expiration (60 seconds) ensuring abandoned claims from crashed workers are safely purged and re-acquired without human intervention.
+      4. Double-checked locking pattern across all three tiers: initial lookup $\rightarrow$ acquire claim $\rightarrow$ double-check execution/remote lookup within lock $\rightarrow$ create/adopt and persist immediately to DB *before* releasing the lock.
+  - **Part C: Multi-Thread Barrier Concurrency Verification:**
+    - Implemented deterministic `threading.Barrier(2)` unit tests for Tier 1 (`test_true_concurrent_adset_creation_barrier`), Tier 2 (`test_true_concurrent_creative_creation_barrier`), and Tier 3 (`test_true_concurrent_ad_creation_barrier`) using isolated SQLite WAL database engines.
+    - Verified that when two threads concurrently attempt creation, exactly 1 remote create call is made, the second thread adopts cleanly, both threads succeed, and zero duplicate remote resources are created.
+    - Verified that abandoned claims are auto-reclaimed after TTL (`test_abandoned_deployment_claim_auto_reclaimed_after_ttl`).
+  - **Part D: Authorization Test Requirements Verified:**
+    - Verified that unauthenticated local callers with `explicit_auth=False` are rejected with `EXPLICIT_AUTHORIZATION_REQUIRED` across all tiers and composite (`test_unauthenticated_local_caller_cannot_mutate_meta_resources`).
+    - Verified that `explicit_auth=True` alone cannot authorize recovery versions > 2 (`test_explicit_auth_alone_is_insufficient_for_higher_versions`).
+    - Verified that caller-supplied `operator_id` strings do not constitute authentication and fail closed with `UNTRUSTED_OPERATOR_AUTHENTICATION` (`test_caller_supplied_operator_id_does_not_constitute_authentication`).
+    - Verified that each tier independently enforces authorization, budget ceilings, spend limits, and prerequisites (`test_each_tier_enforces_authorization_independently`).
+    - Verified that composite deployment cannot bypass tier-level authorization (`test_composite_execution_cannot_bypass_tier_authorization`).
+    - Verified that replayed recovery authorizations are rejected (`test_replayed_recovery_authorization_is_rejected`).
+    - Verified that `VENTUREBOT_SAFE_MODE=true` unconditionally blocks all mutations across all tiers and composite (`test_safe_mode_blocks_mutations_unconditionally_regardless_of_auth`).
+  - **Test Suite Expansion:** Expanded `tests/test_granular_recovery.py` from 24 to 35 hermetic unit tests. Total repository test count increased to 669 passing tests.
+  - **Safety Preserved:** Zero live Meta API mutations made, ₹0.00 spent, SAFE_MODE=True preserved.
+
+- **Step 90.15.3 Independent Granular Deployment Code Audit Summary:**
+  - **Prerequisite State Boundary Hardened (HIGH):** Identified that Tier 2 (`deploy_recovery_creative_dormant`) and Tier 3 (`deploy_recovery_ad_dormant`) previously checked only the presence of `execution.adset_id`. In the Step 90 partial failure state (`execution.status == FAILED`), `execution.adset_id` already held the expired ad set ID (`120252176254130380`). Fixed by strictly enforcing that Tier 2 requires `execution.status` in `(PARTIAL_ADSET, PARTIAL_CREATIVE, DEPLOYED_DORMANT)` and Tier 3 requires `execution.status` in `(PARTIAL_CREATIVE, DEPLOYED_DORMANT)`. Calling Tier 2 or Tier 3 prematurely fails closed with `INVALID_PREREQUISITE_STATE`.
+  - **Financial Ledger & Budget Validation Across All Tiers (HIGH):** Wired independent `actual_spend == 0.00` ledger checks (`ACTUAL_SPEND_EXCEEDS_ZERO`), allocated budget verification (₹200.00), and authorized budget ceiling enforcement (`AUTHORIZED_BUDGET_EXCEEDS_ALLOCATION`) into both Tier 2 and Tier 3, guaranteeing no downstream tier can execute if capital has been spent or misallocated.
+  - **Idempotency Status Verification (HIGH):** Added explicit verification that existing resources on Meta must have status `PAUSED` before adoption in Tier 1 (`adset`) and Tier 3 (`ad`). If an existing resource is found in `ACTIVE` status, adoption fails closed with `UNEXPECTED_RESOURCE_STATUS`, preventing unreviewed active delivery.
+  - **Activated & Deployed State Protection (MEDIUM):** Unified live flighting protection across all three tiers so executions in `ACTIVATED` or `DEPLOYED` status fail closed with `Execution already in live/activated state`.
+  - **Idempotent Retry Progression Fixed (MEDIUM):** Fixed issue where existing `creative_id` or `ad_id` skipped status updating during composite retry, ensuring `PARTIAL_ADSET` -> `PARTIAL_CREATIVE` -> `DEPLOYED_DORMANT` transition succeeds on idempotent retry.
+  - **Call-Site Audit:** Verified that inside `backend/`, only the composite `deploy_recovery_dormant` calls the three granular deployment functions. Zero production CLI, routes, or background processes invoke recovery deployment. All other call sites are in isolated test files.
+  - **Test Suite Expansion:** Expanded `tests/test_granular_recovery.py` from 14 to 24 tests covering Scenarios A, B, C, D, E failure-recovery, prerequisite enforcement, spend checks, and PAUSED status enforcement. Total repository test count increased to 658 passing tests.
+  - **Safety Preserved:** Zero live Meta API mutations made, ₹0.00 spent, SAFE_MODE=True preserved.
+
+- **Step 90.15.2 Granular Meta Deployment Architecture Summary:**
+  - **Modular Architecture Decomposed:** Refactored the monolithic Option B recovery deployment into independently controlled, auditable, and idempotent tiers:
+    1. `deploy_recovery_adset_dormant()`: Validates experiment preconditions, token expiry, zero spend, and budget limits. Performs ad set idempotency lookup (`VB-EXP-{id}-ADSET-v2`). Creates or adopts the replacement ad set in `PAUSED` status with a 24-hour buffer schedule under campaign `120252176243860380`. Records `RESOURCE_SUPERSEDED` and `RESOURCE_CREATED`/`RESOURCE_ADOPTED` events. Persists `adset_id` and advances status to `PARTIAL_ADSET`. Returns immediately without touching creative or ad tiers.
+    2. `deploy_recovery_creative_dormant()`: Requires persisted `adset_id` (`MISSING_ADSET_PREREQUISITE`). Performs creative lookup and creates or adopts creative with approved image hash. Records `RESOURCE_CREATED`/`RESOURCE_ADOPTED` events. Persists `creative_id` and advances status to `PARTIAL_CREATIVE`. Returns immediately without touching ad tier.
+    3. `deploy_recovery_ad_dormant()`: Requires persisted `adset_id` and `creative_id` (`MISSING_ADSET_PREREQUISITE` / `MISSING_CREATIVE_PREREQUISITE`). Performs ad lookup and creates or adopts ad in `PAUSED` status for Meta policy review. Records `RESOURCE_CREATED`/`RESOURCE_ADOPTED` events. Persists `ad_id` and advances status to `DEPLOYED_DORMANT`.
+    4. `deploy_recovery_dormant()`: Preserves backward compatibility by composing Tier 1 $\rightarrow$ Tier 2 $\rightarrow$ Tier 3 in sequence.
+  - **Granular State Machine:** `APPROVED` $\rightarrow$ `PARTIAL_ADSET` $\rightarrow$ `PARTIAL_CREATIVE` $\rightarrow$ `DEPLOYED_DORMANT`. Each tier can be executed and audited independently before progressing.
+  - **Comprehensive Test Suite:** Added `tests/test_granular_recovery.py` with 14 hermetic unit tests verifying tier isolation, prerequisite enforcement, idempotency adoption, PAUSED status enforcement, SAFE_MODE enforcement, untrusted operator identity blocking, replay protection, composite backward compatibility, and activated state immutability.
+  - **Test Suite Verification:** Total repository test count increased to 648 passing tests (634 prior + 14 new).
+  - **Safety Preserved:** Zero live Meta API mutations made, ₹0.00 spent, SAFE_MODE=True preserved.
+
+- **Step 90.14 Meta Token Live Inspection Summary:**
+  - Performed real read-only `/debug_token` inspection against Meta Graph API using `META_APP_ACCESS_TOKEN` inspector.
+  - Verified `SYSTEM_USER` token: App `1063651013045060`, scopes `ads_management` & `ads_read`, unrestricted account access, 418.32 hours remaining validity (> 72h required). Status: **PASS**.
+
+- **Step 90.12.18 Approved Atomic Commit Executed:**
+  - Executed atomic commit `00f36e1` on `main`: `feat: harden VentureBot execution safety and Meta recovery` (15 files staged, 4448 insertions, 96 deletions).
 
 - **Step 90.12.15 Independent Code Audit & Defect Fixes Summary:**
   - **Replay Prevention Fix (HIGH):** In Step 90.12.10, replay prevention only matched version substrings inside `new_resource_id`. Because Meta ad set IDs are purely numeric strings (e.g. `120252176299999999`), real deployments would fail to trigger replay protection. Updated `deploy_recovery_dormant` to record `replacement_name` and `version` in `api_request_summary` and event `reason`, and expanded replay check to evaluate `reason` and `api_request_summary`, ensuring versioned authorizations cannot be replayed.

@@ -641,8 +641,15 @@ To guarantee measurement accuracy, preserve complete audit provenance, and handl
 
 To ensure auditable recovery from interrupted external deployments without mutating expired resources, VentureBot defines the following canonical recovery architecture:
 
-### 1. Two-Phase Readiness-Gated Recovery (Option B)
-- **Phase 1: Dormant Deployment:** Deploys a deterministic versioned replacement ad set (`-ADSET-v2`) in `PAUSED` status with a 24-hour buffer schedule under the existing campaign. Deploys creative and ad in `PAUSED` status for policy review. Original expired ad sets are preserved completely intact and never modified, deleted, or unpaused. An immutable `RESOURCE_SUPERSEDED` audit event is recorded.
+### 1. Two-Phase Readiness-Gated Recovery (Option B) & Granular Deployment Architecture
+- **Phase 1: Granular Dormant Deployment:** Option B dormant deployment is decoupled into three independently callable, auditable, and idempotent tiers:
+  1. `deploy_recovery_adset_dormant()`: Validates experiment preconditions, token validity, zero spend, and budget ceilings. Performs replacement ad set idempotency lookup (`VB-EXP-{id}-ADSET-v2`). Adopts or creates the replacement ad set verifying explicit `PAUSED` status with a 24-hour buffer schedule under the existing campaign. Records `RESOURCE_SUPERSEDED` and `RESOURCE_CREATED`/`RESOURCE_ADOPTED` audit events. Advances execution status to `PARTIAL_ADSET` and persists `adset_id`. Never invokes creative or ad endpoints.
+  2. `deploy_recovery_creative_dormant()`: Fails closed if replacement `adset_id` is missing (`MISSING_ADSET_PREREQUISITE`) or if execution is not in a valid Tier 1 prerequisite state (`PARTIAL_ADSET`). Enforces zero spend (`₹0.00`) and budget ceilings. Performs creative lookup and creates or adopts the creative with deterministic naming and approved image hash. Records `RESOURCE_CREATED`/`RESOURCE_ADOPTED` audit events. Advances status to `PARTIAL_CREATIVE` and persists `creative_id`. Never invokes ad endpoints.
+  3. `deploy_recovery_ad_dormant()`: Fails closed if replacement `adset_id` or `creative_id` is missing (`MISSING_ADSET_PREREQUISITE` / `MISSING_CREATIVE_PREREQUISITE`) or if execution is not in a valid Tier 2 prerequisite state (`PARTIAL_CREATIVE`). Enforces zero spend (`₹0.00`) and budget ceilings. Performs ad lookup and adopts (verifying `PAUSED` status) or creates the ad in explicit `PAUSED` status for policy review. Records `RESOURCE_CREATED`/`RESOURCE_ADOPTED` audit events. Advances status to `DEPLOYED_DORMANT` and persists `ad_id`.
+  4. Composite `deploy_recovery_dormant()`: Preserves backward compatibility by composing Tier 1 $\rightarrow$ Tier 2 $\rightarrow$ Tier 3 sequentially.
+- **Granular State Machine:**
+  `APPROVED` $\rightarrow$ `PARTIAL_ADSET` $\rightarrow$ `PARTIAL_CREATIVE` $\rightarrow$ `DEPLOYED_DORMANT`
+  Each tier independently verifies prerequisites, spend, and status, and can be independently executed, verified, and audited by the operator before progressing to downstream tiers. Original expired ad sets are preserved completely intact and never modified, deleted, or unpaused. Executions in live/flighting states (`ACTIVATED`, `DEPLOYED`) are strictly prohibited from re-entering dormant deployment.
 - **Replay Prevention Invariant:** Once a versioned recovery deployment has executed and generated `RESOURCE_CREATED` or `RESOURCE_ADOPTED` events, repeated creation under the same version is strictly blocked (`RECOVERY_AUTHORIZATION_REPLAY_REJECTED`). Replay checks inspect `new_resource_id`, event `reason`, and `api_request_summary` to account for purely numeric Meta resource IDs.
 - **Phase 2: Readiness-Gated Activation:** Activation strictly requires Meta ad review approval, explicit human authorization, SAFE_MODE un-gated strictly for that single action, verified `₹0.00` actual ledger spend, and a schedule locked to an exact 48.0-hour duration in the future.
 
@@ -666,11 +673,26 @@ To ensure auditable recovery from interrupted external deployments without mutat
 - `is_safe_mode_enforced(safe_mode)` evaluates the environment setting `VENTUREBOT_SAFE_MODE` and guarantees that caller-supplied `safe_mode=False` cannot override an active environment guard, while caller-supplied `safe_mode=True` is always honored even if environment SAFE_MODE is false.
 - `MetaMarketingApiAdapter._execute_request()` raises `MetaApiSafetyError` before calling any transport on all mutation methods (POST, PUT, DELETE, PATCH, `is_write=True`). Transport injection cannot bypass SAFE_MODE.
 
-### 6. Recovery Version Trust Boundary
-- Recovery version 2 is the ONLY currently permitted recovery version.
-- Recovery versions above 2 remain permanently blocked pending the implementation of a trusted operator authentication/RBAC subsystem. Caller-supplied operator IDs are unauthenticated strings and cannot cross the security trust boundary.
+### 6. Concurrency Control & Double-Checked Locking (Step 90.15.4)
+- **Meta Graph API Duplicate Creation Vulnerability:** The Meta Marketing API does not support distributed idempotency keys or unique name constraints for ad sets, creatives, or ads. Concurrent POST requests with identical parameters produce distinct duplicate remote resources.
+- **Two-Layer Reservation & Mutual Exclusion (`claim_deployment_tier`):**
+  1. *In-Process Thread Mutex:* Process-wide dictionary of non-reentrant locks `_TIER_THREAD_LOCKS[(experiment_id, tier)]` managed under `_TIER_LOCKS_MUTEX`.
+  2. *Cross-Process DB Reservation:* `DeploymentClaimORM` table with unique constraint `uq_deployment_claims_exp_tier` on `(experiment_id, tier)`. Attempts to acquire an existing active claim result in database-level mutual exclusion and poll with exponential backoff until released or timeout (default 10.0s).
+  3. *TTL Abandoned Claim Recovery:* Claims hold a 60-second TTL (`expires_at`). If a process crashes while holding a claim, subsequent operations automatically detect the expired claim, purge it safely, and re-acquire.
+- **Double-Checked Locking Pattern:**
+  - Fast-path: Perform read-only lookup on Meta. If resource exists exact, adopt immediately.
+  - Claim acquisition: If resource does not exist, acquire `claim_deployment_tier`.
+  - Double-check: Refresh execution and re-query Meta within claim lock. If another thread/process completed creation during lock acquisition, adopt the newly created resource without invoking Meta's create endpoint.
+  - Remote mutation & immediate persistence: If still absent, create the resource on Meta and persist resource ID and state to the local DB immediately *within* the claim lock before releasing.
 
-### 6. Operational & Financial Safeguards
+### 7. Recovery Version Trust Boundary & Operator Identity (Step 90.15.4)
+- **Absence of Identity Provider:** VentureBot currently possesses NO cryptographic signature verification, JWT validator, OAuth identity provider, or role-based access control (RBAC) subsystem.
+- **Caller-Supplied Flags vs. Authentication:** The parameter `explicit_auth: bool` and audit fields such as `operator_id: str` are caller-supplied arguments and cannot establish verified human identity across an untrusted boundary.
+- **Operational Reality of Version 2:** Recovery version 2 (`-ADSET-v2`) was hardcoded as a narrow operational assumption following the human operator instruction to adopt Option B. However, an arbitrary local caller can invoke version 2.
+- **Fail-Closed Higher Versions:** Recovery versions above 2 fail closed under Rules A.7 & A.8 (`UNTRUSTED_OPERATOR_AUTHENTICATION`).
+- **Mandatory Safety Blocking:** Because no authenticated operator identity provider exists, live Meta mutations MUST remain strictly blocked under `VENTUREBOT_SAFE_MODE=true`.
+
+### 8. Operational & Financial Safeguards
 - Audit events in `external_execution_events` provide an **application-level append-only** guarantee, not engine-level immutability.
 - **Spend Protection Semantics & Thresholds:**
   - **Approved Allocation:** ₹200.00 ceiling committed for the experiment.
