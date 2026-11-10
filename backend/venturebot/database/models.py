@@ -6,7 +6,18 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -158,6 +169,16 @@ class ExperimentORM(Base):
         back_populates="experiment",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+    mutation_capabilities: Mapped[list["MutationCapabilityORM"]] = relationship(
+        "MutationCapabilityORM",
+        back_populates="experiment",
+        passive_deletes=True,
+    )
+    mutation_intents: Mapped[list["MutationIntentLedgerORM"]] = relationship(
+        "MutationIntentLedgerORM",
+        back_populates="experiment",
+        passive_deletes=True,
     )
 
     @property
@@ -377,4 +398,222 @@ class DeploymentClaimORM(Base):
     __table_args__ = (
         UniqueConstraint("experiment_id", "tier", name="uq_deployment_claims_exp_tier"),
     )
+
+
+# Approved lifecycle states, statuses, and roles (Step 90.16.5B)
+VALID_OPERATOR_ROLES: tuple[str, ...] = (
+    "ROLE_VIEWER",
+    "ROLE_OPERATOR",
+    "ROLE_ADMIN",
+)
+
+VALID_CAPABILITY_STATUSES: tuple[str, ...] = (
+    "ISSUED",
+    "CONSUMED",
+    "EXPIRED",
+    "REVOKED",
+)
+
+VALID_MUTATION_INTENT_STATES: tuple[str, ...] = (
+    "INTENT_CREATED",
+    "MUTATION_DISPATCHING",
+    "NOT_DISPATCHED",
+    "MUTATION_ABORTED_PRE_DISPATCH",
+    "DISPATCH_POSSIBLE",
+    "MUTATION_OUTCOME_UNKNOWN",
+    "MUTATION_CONFIRMED",
+    "MUTATION_REJECTED",
+    "RECONCILIATION_UNRESOLVED_BLOCKED",
+    "MANUALLY_RESOLVED_ABSENT",
+)
+
+
+class SystemBootstrapORM(Base):
+    """Singleton record enforcing one-time system bootstrap (Step 90.16.7B)."""
+    __tablename__ = "system_bootstrap"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # Strictly singleton id=1
+    is_bootstrapped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    bootstrapped_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    admin_operator_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("operators.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    bootstrap_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Relationships
+    admin_operator: Mapped["OperatorORM"] = relationship("OperatorORM")
+
+
+class OperatorORM(Base):
+    """Authenticated human operator identity for authorization and audit provenance."""
+    __tablename__ = "operators"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="ROLE_OPERATOR", index=True)
+    failed_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # Relationships
+    sessions: Mapped[list["OperatorSessionORM"]] = relationship(
+        "OperatorSessionORM",
+        back_populates="operator",
+        cascade="all, delete-orphan",
+        order_by="OperatorSessionORM.created_at",
+    )
+    capabilities: Mapped[list["MutationCapabilityORM"]] = relationship(
+        "MutationCapabilityORM",
+        back_populates="operator",
+        passive_deletes=True,
+    )
+
+
+class OperatorSessionORM(Base):
+    """Session record for authenticated operator; stores SHA-256 digest of token (never raw token)."""
+    __tablename__ = "operator_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operator_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("operators.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    last_activity_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    # Relationships
+    operator: Mapped["OperatorORM"] = relationship("OperatorORM", back_populates="sessions")
+
+
+class MutationCapabilityORM(Base):
+    """Single-use cryptographic capability ticket authorizing a granular remote mutation."""
+    __tablename__ = "mutation_capabilities"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operator_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("operators.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    experiment_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("experiments.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    tier: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    exact_operation: Mapped[str] = mapped_column(String(100), nullable=False)
+    budget_ceiling_amount: Mapped[Decimal] = mapped_column(
+        Numeric(precision=12, scale=2, asdecimal=True), nullable=False
+    )
+    budget_ceiling_currency: Mapped[str] = mapped_column(String(10), nullable=False, default="INR")
+    expected_parent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    replacement_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    http_method: Mapped[str] = mapped_column(String(10), nullable=False, default="POST")
+    parameters_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    key_id: Mapped[str] = mapped_column(String(50), nullable=False, default="k1")
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="ISSUED", index=True)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    # Relationships
+    operator: Mapped["OperatorORM"] = relationship("OperatorORM", back_populates="capabilities")
+    experiment: Mapped["ExperimentORM"] = relationship("ExperimentORM", back_populates="mutation_capabilities")
+    intent: Mapped["MutationIntentLedgerORM | None"] = relationship(
+        "MutationIntentLedgerORM",
+        back_populates="capability",
+        uselist=False,
+    )
+
+
+class MutationIntentLedgerORM(Base):
+    """Durable pre-dispatch intent ledger tracking remote mutation lifecycle and crash recovery."""
+    __tablename__ = "mutation_intent_ledger"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("mutation_capabilities.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    experiment_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("experiments.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    tier: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(50), nullable=False, default="MUTATION_DISPATCHING", index=True)
+    parameters_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    remote_resource_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # Relationships
+    capability: Mapped["MutationCapabilityORM"] = relationship("MutationCapabilityORM", back_populates="intent")
+    experiment: Mapped["ExperimentORM"] = relationship("ExperimentORM", back_populates="mutation_intents")
 
