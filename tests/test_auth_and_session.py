@@ -93,25 +93,31 @@ def db_session() -> Generator[Session, None, None]:
 
 
 @pytest.fixture
-def admin_operator(db_session: Session) -> OperatorORM:
+def admin_operator(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> OperatorORM:
     """Provide a bootstrapped administrator for tests creating other operators."""
+    token = "valid_bootstrap_token_12345"
+    monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
     return bootstrap_initial_admin(
         db_session,
         username="system_admin",
         password="AdminPassphrase123!",
-        bootstrap_token="valid_bootstrap_token_12345",
+        bootstrap_token=token,
     )
 
 
 class TestBootstrapSecurityAndConcurrency:
-    """Adversarial tests for Finding SEC-90.16.7A-02 (Secure first-administrator bootstrap)."""
+    """Adversarial tests for Finding SEC-90.16.7A-02 and VERIF-90.16.7C-01 (Fail-closed admin bootstrap)."""
 
-    def test_bootstrap_initial_admin_success(self, db_session: Session) -> None:
+    def test_bootstrap_initial_admin_success(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        token = "valid_token_32_characters_long!"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         admin = bootstrap_initial_admin(
             db_session,
             username="initial_admin",
             password="SecureAdminPass123!",
-            bootstrap_token="valid_token_32_characters_long!",
+            bootstrap_token=token,
         )
         assert admin.id is not None
         assert admin.username == "initial_admin"
@@ -124,38 +130,121 @@ class TestBootstrapSecurityAndConcurrency:
         assert lock is not None
         assert lock.is_bootstrapped is True
         assert lock.admin_operator_id == admin.id
-        assert lock.bootstrap_token_hash == generate_sha256_digest("valid_token_32_characters_long!")
+        assert lock.bootstrap_token_hash == generate_sha256_digest(token)
 
-    def test_bootstrap_token_validation(self, db_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-        # 1. Missing token when no env var set (requires >= 16 chars)
-        with pytest.raises(AuthorizationError, match="at least 16 characters"):
+    def test_missing_environment_token_rejects_bootstrap(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finding VERIF-90.16.7C-01: Bootstrap fails closed if VENTUREBOT_BOOTSTRAP_TOKEN is not configured."""
+        monkeypatch.delenv("VENTUREBOT_BOOTSTRAP_TOKEN", raising=False)
+        with pytest.raises(
+            AuthorizationError,
+            match="VENTUREBOT_BOOTSTRAP_TOKEN environment variable is not configured",
+        ):
+            bootstrap_initial_admin(
+                db_session,
+                username="admin",
+                password="Password123!",
+                bootstrap_token="some_token_16_characters_long!",
+            )
+        # Verify durable DB state: no bootstrap record, no operator
+        assert db_session.get(SystemBootstrapORM, 1) is None
+        assert db_session.execute(select(OperatorORM)).first() is None
+
+    def test_empty_environment_token_rejects_bootstrap(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bootstrap fails closed if VENTUREBOT_BOOTSTRAP_TOKEN is empty or whitespace."""
+        for empty_val in ("", "   ", "\t\n"):
+            monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", empty_val)
+            with pytest.raises(
+                AuthorizationError,
+                match="VENTUREBOT_BOOTSTRAP_TOKEN environment variable is not configured",
+            ):
+                bootstrap_initial_admin(
+                    db_session,
+                    username="admin",
+                    password="Password123!",
+                    bootstrap_token="some_token_16_characters_long!",
+                )
+            assert db_session.get(SystemBootstrapORM, 1) is None
+            assert db_session.execute(select(OperatorORM)).first() is None
+
+    def test_short_environment_token_rejects_bootstrap(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bootstrap fails closed if VENTUREBOT_BOOTSTRAP_TOKEN is shorter than minimum length (16)."""
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", "short_secret")
+        with pytest.raises(AuthorizationError, match="must be at least 16 characters"):
+            bootstrap_initial_admin(
+                db_session,
+                username="admin",
+                password="Password123!",
+                bootstrap_token="short_secret",
+            )
+        assert db_session.get(SystemBootstrapORM, 1) is None
+        assert db_session.execute(select(OperatorORM)).first() is None
+
+    def test_arbitrary_caller_token_rejected_when_configuration_missing(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An arbitrary 16-character caller-supplied token cannot bypass missing environment configuration."""
+        monkeypatch.delenv("VENTUREBOT_BOOTSTRAP_TOKEN", raising=False)
+        for caller_token in (
+            "1234567890123456",
+            "a" * 32,
+            "super_secret_caller_token_12345!",
+        ):
+            with pytest.raises(
+                AuthorizationError,
+                match="VENTUREBOT_BOOTSTRAP_TOKEN environment variable is not configured",
+            ):
+                bootstrap_initial_admin(
+                    db_session,
+                    username="admin",
+                    password="Password123!",
+                    bootstrap_token=caller_token,
+                )
+        assert db_session.get(SystemBootstrapORM, 1) is None
+        assert db_session.execute(select(OperatorORM)).first() is None
+
+    def test_configured_token_matching_and_rejection(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When configured, caller token must match exactly in constant time."""
+        configured = "env_secret_token_at_least_16_chars!"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", configured)
+
+        # 1. Missing / None / empty caller token rejected
+        with pytest.raises(AuthorizationError, match="Invalid or missing bootstrap token"):
+            bootstrap_initial_admin(db_session, "admin", "Password123!", bootstrap_token=None)
+
+        with pytest.raises(AuthorizationError, match="Invalid or missing bootstrap token"):
             bootstrap_initial_admin(db_session, "admin", "Password123!", bootstrap_token="")
 
-        with pytest.raises(AuthorizationError, match="at least 16 characters"):
-            bootstrap_initial_admin(db_session, "admin", "Password123!", bootstrap_token="short")
-
-        # 2. When VENTUREBOT_BOOTSTRAP_TOKEN is configured in environment
-        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", "env_secret_token_12345")
-
-        # Wrong token rejected
+        # 2. Incorrect caller token rejected
         with pytest.raises(AuthorizationError, match="Invalid or missing bootstrap token"):
-            bootstrap_initial_admin(db_session, "admin", "Password123!", bootstrap_token="wrong_token_value_here")
+            bootstrap_initial_admin(db_session, "admin", "Password123!", bootstrap_token="wrong_token_value_here!")
 
-        # Correct token accepted
+        # 3. Exact match succeeds
         admin = bootstrap_initial_admin(
             db_session,
-            "admin",
-            "Password123!",
-            bootstrap_token="env_secret_token_12345",
+            username="admin",
+            password="Password123!",
+            bootstrap_token=configured,
         )
         assert admin.role == ROLE_ADMIN
 
-    def test_bootstrap_cannot_be_repeated(self, db_session: Session) -> None:
+    def test_bootstrap_cannot_be_repeated(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        token = "token_abcdef_12345678"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         bootstrap_initial_admin(
             db_session,
             username="admin1",
             password="Password123!",
-            bootstrap_token="token_abcdef_12345678",
+            bootstrap_token=token,
         )
 
         # Attempting bootstrap a second time must fail closed
@@ -164,10 +253,14 @@ class TestBootstrapSecurityAndConcurrency:
                 db_session,
                 username="admin2",
                 password="Password123!",
-                bootstrap_token="token_abcdef_12345678",
+                bootstrap_token=token,
             )
 
-    def test_bootstrap_rejected_if_operators_already_exist(self, db_session: Session) -> None:
+    def test_bootstrap_rejected_if_operators_already_exist(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        token = "valid_token_12345678"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         # If an operator somehow exists without bootstrap lock
         op = OperatorORM(
             username="existing_op",
@@ -182,17 +275,21 @@ class TestBootstrapSecurityAndConcurrency:
                 db_session,
                 username="admin",
                 password="Password123!",
-                bootstrap_token="valid_token_12345678",
+                bootstrap_token=token,
             )
 
-    def test_bootstrap_interruption_and_rollback(self, db_session: Session) -> None:
+    def test_bootstrap_interruption_and_rollback(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        token = "token_abcdef_12345678"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         # Malformed password causes immediate rollback before persisting
         with pytest.raises(ValueError, match="at least 8 characters"):
             bootstrap_initial_admin(
                 db_session,
                 username="admin",
                 password="short",
-                bootstrap_token="token_abcdef_12345678",
+                bootstrap_token=token,
             )
 
         # Ensure no partially created admin or lock exists
@@ -204,16 +301,22 @@ class TestBootstrapSecurityAndConcurrency:
             db_session,
             username="admin",
             password="ValidPassword123!",
-            bootstrap_token="token_abcdef_12345678",
+            bootstrap_token=token,
         )
         assert admin is not None
 
-    def test_concurrent_bootstrap_attempts_race(self) -> None:
+    def test_concurrent_bootstrap_attempts_race(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Simulate two threads attempting to bootstrap simultaneously against the same DB."""
+        import tempfile
+        token = "concurrent_token_123456"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
+        tmp_dir = tempfile.mkdtemp()
+        db_path = os.path.join(tmp_dir, "test_concurrent_bootstrap.db")
         engine = create_engine(
-            "sqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
+            f"sqlite:///{db_path}",
+            connect_args={"timeout": 30.0},
         )
         init_db(engine)
         session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -229,7 +332,7 @@ class TestBootstrapSecurityAndConcurrency:
                     session,
                     username=username,
                     password="Password123!",
-                    bootstrap_token="concurrent_token_123456",
+                    bootstrap_token=token,
                 )
                 results.append({"status": "SUCCESS", "username": admin.username})
             except Exception as err:
@@ -258,6 +361,11 @@ class TestBootstrapSecurityAndConcurrency:
         assert verify_session.get(SystemBootstrapORM, 1) is not None
         verify_session.close()
         engine.dispose()
+        try:
+            os.remove(db_path)
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 class TestOperatorIdentityService:
@@ -529,9 +637,11 @@ class TestAuthenticationThrottling:
         assert auth.failed_attempt_count == 0
 
     def test_concurrent_failed_logins_atomic_increments(
-        self, admin_operator: OperatorORM
+        self, admin_operator: OperatorORM, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Finding SEC-90.16.7A-04: Concurrent failed logins execute atomic SQL increments without lost updates."""
+        token = "token_for_atomic_test_12345"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         import tempfile
         tmp_dir = tempfile.mkdtemp()
         db_path = os.path.join(tmp_dir, "test_atomic_throttle.db")
@@ -548,7 +658,7 @@ class TestAuthenticationThrottling:
             init_session,
             "admin",
             "AdminPassword123!",
-            bootstrap_token="token_for_atomic_test_12345",
+            bootstrap_token=token,
         )
         create_operator(
             init_session,
@@ -590,7 +700,11 @@ class TestAuthenticationThrottling:
         except OSError:
             pass
 
-    def test_durable_throttling_survives_process_restart(self) -> None:
+    def test_durable_throttling_survives_process_restart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        token = "token_restart_test_12345"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         import tempfile
         tmp_dir = tempfile.mkdtemp()
         db_path = os.path.join(tmp_dir, "test_durable_throttle.db")
@@ -599,7 +713,7 @@ class TestAuthenticationThrottling:
         sf1 = sessionmaker(bind=engine1)
         s1 = sf1()
 
-        admin = bootstrap_initial_admin(s1, "admin", "AdminPass123!", bootstrap_token="token_restart_test_12345")
+        admin = bootstrap_initial_admin(s1, "admin", "AdminPass123!", bootstrap_token=token)
         create_operator(s1, "restart_user", "Password123!", creator_operator=admin)
         with pytest.raises(AuthenticationError):
             authenticate_operator(s1, "restart_user", "bad1", enforce_sleep=False)
@@ -814,9 +928,11 @@ class TestSessionManagement:
             validate_session(db_session, raw_token)
 
     def test_session_revocation_racing_with_validation(
-        self, admin_operator: OperatorORM
+        self, admin_operator: OperatorORM, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Finding SEC-90.16.7A-05: Revocation racing with validation fails closed once revoked."""
+        token = "token_race_test_12345"
+        monkeypatch.setenv("VENTUREBOT_BOOTSTRAP_TOKEN", token)
         engine = create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False},
@@ -826,7 +942,7 @@ class TestSessionManagement:
         session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
         s_init = session_factory()
-        admin = bootstrap_initial_admin(s_init, "admin", "Password123!", bootstrap_token="token_race_test_12345")
+        admin = bootstrap_initial_admin(s_init, "admin", "Password123!", bootstrap_token=token)
         op = create_operator(s_init, "race_user", "Password123!", creator_operator=admin)
         _, raw_token = create_session(s_init, op)
         s_init.close()
