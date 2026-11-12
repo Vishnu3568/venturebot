@@ -1,6 +1,7 @@
 """Operator Identity Service, Secure Bootstrap, and Authentication Throttling for VentureBot.
 
-Implements Phase B Trusted Operator authentication and remediation per Step 90.16.7B:
+Implements Phase B Trusted Operator authentication and remediation per Steps 90.16.7B and 90.16.7D:
+- Strictly fail-closed local administrator bootstrap requiring VENTUREBOT_BOOTSTRAP_TOKEN (VERIF-90.16.7C-01).
 - One-time secure local administrator bootstrap with atomic singleton database locking (SEC-90.16.7A-02).
 - Universal operator creation authorization: All operator creation strictly requires an active
   creator_operator possessing PERM_SECURITY_ADMIN (SEC-90.16.7A-01).
@@ -147,30 +148,34 @@ def bootstrap_initial_admin(
     password: str,
     bootstrap_token: str | None = None,
 ) -> OperatorORM:
-    """One-time trusted local initialization of the initial administrator (Step 90.16.7B).
+    """One-time trusted local initialization of the initial administrator (Step 90.16.7D).
 
-    Remediates finding SEC-90.16.7A-02:
+    Remediates finding VERIF-90.16.7C-01:
+    - Enforces strictly fail-closed initial administrator bootstrap.
+    - Requires VENTUREBOT_BOOTSTRAP_TOKEN to be configured and non-empty in the process environment.
+    - If VENTUREBOT_BOOTSTRAP_TOKEN is missing, empty, or whitespace, raises AuthorizationError immediately.
+    - Never accepts a caller-supplied token as an alternative when configuration is missing.
+    - Performs constant-time comparison (hmac.compare_digest) between caller-supplied token and configured environment token.
     - Single-use database-level singleton lock (`SystemBootstrapORM` row id=1).
-    - Requires non-empty, high-entropy bootstrap token (minimum 16 chars).
-    - If `VENTUREBOT_BOOTSTRAP_TOKEN` is set in the environment, the provided token
-      must match it in constant time (`hmac.compare_digest`).
     - Validates username and password strength.
     - Confirms zero operators exist in the database.
     - Atomically commits the initial administrator and the singleton bootstrap record.
     - Cannot be repeated; subsequent calls raise `AuthorizationError`.
     - Rollback on failure ensures no partially privileged state is persisted.
+    - Never logs or exposes either token.
 
     Args:
         db_session: Active SQLAlchemy session.
         username: Desired administrator username.
         password: Plaintext password string.
-        bootstrap_token: High-entropy bootstrap secret token.
+        bootstrap_token: High-entropy bootstrap secret token matching VENTUREBOT_BOOTSTRAP_TOKEN.
 
     Returns:
         Persisted initial administrator OperatorORM record.
 
     Raises:
-        AuthorizationError: If system is already bootstrapped or token is invalid.
+        AuthorizationError: If environment token is not configured, token is invalid,
+            system is already bootstrapped, or operators already exist.
         ValueError: On invalid username or password.
     """
     # 1. Check if bootstrap lock already exists in DB
@@ -183,17 +188,25 @@ def bootstrap_initial_admin(
     if any_op is not None:
         raise AuthorizationError("Operators already exist in system. Bootstrap is permanently closed.")
 
-    # 3. Validate bootstrap token
+    # 3. Validate bootstrap token: strictly fail-closed (VERIF-90.16.7C-01 remediation)
     env_token = os.environ.get("VENTUREBOT_BOOTSTRAP_TOKEN")
-    if env_token:
-        if not bootstrap_token or not hmac.compare_digest(bootstrap_token, env_token):
-            raise AuthorizationError("Invalid or missing bootstrap token.")
-    else:
-        if not isinstance(bootstrap_token, str) or len(bootstrap_token) < MIN_BOOTSTRAP_TOKEN_LENGTH:
-            raise AuthorizationError(
-                f"A secure bootstrap token of at least {MIN_BOOTSTRAP_TOKEN_LENGTH} characters "
-                "is required for initial bootstrap."
-            )
+    if not env_token or not env_token.strip():
+        raise AuthorizationError(
+            "Bootstrap is disabled: VENTUREBOT_BOOTSTRAP_TOKEN environment variable is not configured."
+        )
+
+    configured_token = env_token.strip()
+    if len(configured_token) < MIN_BOOTSTRAP_TOKEN_LENGTH:
+        raise AuthorizationError(
+            f"Bootstrap is disabled: VENTUREBOT_BOOTSTRAP_TOKEN must be at least {MIN_BOOTSTRAP_TOKEN_LENGTH} characters."
+        )
+
+    if (
+        not isinstance(bootstrap_token, str)
+        or not bootstrap_token
+        or not hmac.compare_digest(bootstrap_token, configured_token)
+    ):
+        raise AuthorizationError("Invalid or missing bootstrap token.")
 
     # 4. Validate username and password
     if not isinstance(username, str) or not USERNAME_REGEX.match(username):
