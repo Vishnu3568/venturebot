@@ -587,6 +587,7 @@ def consume_capability(
     expected_parameters_digest: str | None = None,
     expected_max_budget: Decimal | str | None = None,
     now: datetime | None = None,
+    auto_commit: bool = True,
 ) -> MutationCapabilityORM:
     """Atomically consume a capability ticket in the database.
 
@@ -660,7 +661,10 @@ def consume_capability(
 
     try:
         result = db_session.execute(stmt)
-        db_session.commit()
+        if auto_commit:
+            db_session.commit()
+        else:
+            db_session.flush()
     except SQLAlchemyError as err:
         db_session.rollback()
         logger.error("Database error during atomic capability consumption for ticket %s: %s", ticket_id, err)
